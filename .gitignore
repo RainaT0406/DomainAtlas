@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing/cache
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+# Neo4j/local database files
+neo4j_data/
+
+# Generated reports
+reports/
+*.pdf
+
+# Temporary files
+*.tmp
+*.temp
+
+# Generated OSINT data
+data/raw/*
+data/normalized/*
+
+# Keep the directories in Git
+!data/raw/.gitkeep
+!data/normalized/.gitkeep
