@@ -46,3 +46,6 @@ data/normalized/*
 # Keep the directories in Git
 !data/raw/.gitkeep
 !data/normalized/.gitkeep
+
+# Node Modules
+node_modules/

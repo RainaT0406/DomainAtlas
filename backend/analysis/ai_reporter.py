@@ -3,257 +3,742 @@ import ollama
 from backend.analysis.graph_analyzer import get_domain_analysis
 
 
+# ============================================================
+# AI-ASSISTED INTELLIGENCE REPORTER
+# ============================================================
+
 def generate_ai_report(analysis):
     """
     Generate an AI-assisted intelligence report from
-    graph-derived OSINT observations.
+    graph-derived OSINT analysis.
 
-    The LLM is used only to summarize and interpret
-    information already derived from the Neo4j graph.
+    The LLM acts only as a reporting and interpretation layer.
+
+    The LLM must:
+        - use only supplied graph-analysis data
+        - preserve graph relationship direction
+        - avoid unsupported conclusions
+        - attribute VirusTotal information correctly
+        - avoid ownership/security/maliciousness claims
     """
 
-    subdomains = analysis["infrastructure"]["subdomains"]
-    ip_addresses = analysis["infrastructure"]["ip_addresses"]
-    asns = analysis["infrastructure"]["asns"]
-    organizations = analysis["infrastructure"]["organizations"]
-    certificates = analysis["infrastructure"]["certificates"]
-    observations = analysis.get("observations", [])
+    # ========================================================
+    # VALIDATE INPUT
+    # ========================================================
 
-    prompt = f"""
-You are an OSINT intelligence reporting assistant.
+    if not isinstance(analysis, dict):
+        raise ValueError(
+            "Analysis data must be provided as a dictionary."
+        )
 
-Your role is to transform structured graph-analysis results
-into a concise analyst-readable report.
+    required_fields = [
+        "domain",
+        "statistics",
+        "infrastructure"
+    ]
 
-IMPORTANT:
+    for field in required_fields:
+        if field not in analysis:
+            raise ValueError(
+                f"Required analysis field missing: {field}"
+            )
 
-The supplied information comes from a Neo4j graph generated
-from publicly collected OSINT data.
+    # ========================================================
+    # EXTRACT GRAPH ANALYSIS DATA
+    # ========================================================
 
-You MUST use ONLY the information provided below.
+    domain = analysis["domain"]
 
-Do NOT invent facts.
-Do NOT introduce external knowledge.
-Do NOT make unsupported cybersecurity conclusions.
+    statistics = analysis.get(
+        "statistics",
+        {}
+    )
 
-============================================================
-GRAPH ANALYSIS DATA
-============================================================
+    relationships = analysis.get(
+        "relationships",
+        {}
+    )
 
-Domain:
+    infrastructure = analysis.get(
+        "infrastructure",
+        {}
+    )
 
-{analysis["domain"]}
+    subdomains = infrastructure.get(
+        "subdomains",
+        []
+    )
 
-Statistics:
+    ip_addresses = infrastructure.get(
+        "ip_addresses",
+        []
+    )
 
-- Observed subdomains: {analysis["statistics"]["subdomains"]}
-- Observed IP addresses: {analysis["statistics"]["ip_addresses"]}
-- Observed ASNs: {analysis["statistics"]["asns"]}
-- Observed organizations: {analysis["statistics"]["organizations"]}
-- Observed certificates: {analysis["statistics"]["certificates"]}
+    asns = infrastructure.get(
+        "asns",
+        []
+    )
 
-Graph-derived observations:
+    organizations = infrastructure.get(
+        "organizations",
+        []
+    )
 
-{chr(10).join("- " + x for x in observations)}
+    certificates = infrastructure.get(
+        "certificates",
+        []
+    )
 
-IP addresses:
+    observations = analysis.get(
+        "observations",
+        []
+    )
 
-{chr(10).join("- " + x for x in ip_addresses)}
+    # ========================================================
+    # IP VERSION INFORMATION
+    # ========================================================
 
-ASNs:
+    ip_version_summary = analysis.get(
+        "ip_version_summary",
+        {}
+    )
 
-{chr(10).join("- " + x for x in asns)}
+    ipv4_count = ip_version_summary.get(
+        "ipv4",
+        0
+    )
 
-Organizations:
+    ipv6_count = ip_version_summary.get(
+        "ipv6",
+        0
+    )
 
-{chr(10).join("- " + x for x in organizations)}
+    unknown_ip_count = ip_version_summary.get(
+        "unknown",
+        0
+    )
 
-Certificates:
+    # ========================================================
+    # VIRUSTOTAL INTELLIGENCE
+    # ========================================================
 
-{chr(10).join("- " + x for x in certificates)}
+    virustotal = analysis.get(
+        "virustotal",
+        {}
+    )
 
-First 20 observed subdomains:
+    if not isinstance(virustotal, dict):
+        virustotal = {}
 
-{chr(10).join("- " + x for x in subdomains[:20])}
+    # ========================================================
+    # PREPARE VIRUSTOTAL DATA
+    # ========================================================
 
-============================================================
-REPORTING RULES
-============================================================
+    if virustotal:
 
-1. Report observations that are directly supported by the
-   supplied graph data.
+        virustotal_text = f"""
+Source:
+{virustotal.get("source", "Not available")}
 
-2. You may provide limited interpretation of those observations,
-   but clearly distinguish interpretation from fact.
+Method:
+{virustotal.get("method", "Not available")}
 
-3. Do NOT determine whether the domain is malicious or benign.
+Recorded At:
+{virustotal.get("recorded_at", "Not available")}
 
-4. Do NOT make claims about threat level, intent, reputation,
-   compromise, or suspiciousness.
+Reputation:
+{virustotal.get("reputation", "Not available")}
 
-5. Do NOT claim that an organization owns the domain merely
-   because an observed IP address is associated with that
-   organization.
+Malicious detections:
+{virustotal.get("malicious", "Not available")}
 
-6. Do NOT claim that certificates prove that a domain is secure,
-   trusted, or legitimate.
+Suspicious detections:
+{virustotal.get("suspicious", "Not available")}
 
-7. Do NOT claim that a large number of subdomains is evidence
-   of malicious activity.
+Harmless detections:
+{virustotal.get("harmless", "Not available")}
 
-8. Do NOT describe the infrastructure as "robust", "secure",
-   "trusted", "malicious", or "suspicious" unless the supplied
-   graph data explicitly supports such a statement.
+Undetected results:
+{virustotal.get("undetected", "Not available")}
 
-9. Do NOT infer information that is absent from the graph.
+Timeout results:
+{virustotal.get("timeout", "Not available")}
 
-10. If the available information is insufficient to determine
-    something, explicitly state that it cannot be determined
-    from the collected data.
+Registrar:
+{virustotal.get("registrar", "Not available")}
 
-11. Do not reproduce the complete subdomain list.
-    Only discuss the supplied subdomain statistics and examples.
+Creation Date:
+{virustotal.get("creation_date", "Not available")}
 
-12. Keep the report concise and technically precise.
+Last Modification Date:
+{virustotal.get(
+    "last_modification_date",
+    "Not available"
+)}
 
-13. Do not introduce new section headings.
+Categories:
+{virustotal.get("categories", {})}
 
-14. Do not rename the required section headings.
+Popularity Ranks:
+{virustotal.get("popularity_ranks", {})}
 
-============================================================
-REQUIRED REPORT FORMAT
-============================================================
+DNS Records:
+{virustotal.get("dns_records", {})}
+"""
 
-Produce EXACTLY these six sections and use EXACTLY these
-section headings:
+    else:
 
-1. Domain Infrastructure
+        virustotal_text = (
+            "No VirusTotal intelligence was available."
+        )
 
-Describe the observed domain, subdomain count, IP addresses,
-and IP version distribution if available.
+    # ========================================================
+    # FORMAT LISTS SAFELY
+    # ========================================================
 
-If mentioning ASN or organization information, describe it
-through the observed IP infrastructure. Do not imply a direct
-Domain -> ASN or Domain -> Organization relationship unless
-such a relationship explicitly exists in the graph.
+    def format_list(values):
 
-2. Network Relationships
+        if not values:
+            return "None observed."
 
-Describe the observed relationships between the domain,
-IP addresses, and ASNs.
+        return "\n".join(
+            f"- {str(value)}"
+            for value in values
+        )
 
-The graph relationships are directional and must not be
-represented as direct relationships when they are actually
-multi-hop relationships.
+    # ========================================================
+    # FORMAT OBSERVATIONS
+    # ========================================================
+
+    if observations:
+
+        observations_text = "\n".join(
+            f"- {str(observation)}"
+            for observation in observations
+        )
+
+    else:
+
+        observations_text = (
+            "No graph-derived observations were generated."
+        )
+
+    # ========================================================
+    # FORMAT RELATIONSHIPS
+    # ========================================================
+
+    if relationships:
+
+        relationships_text = "\n".join(
+            f"- {key}: {value}"
+            for key, value in relationships.items()
+        )
+
+    else:
+
+        relationships_text = (
+            "No relationship counts were available."
+        )
+
+    # ========================================================
+    # SYSTEM INSTRUCTIONS
+    # ========================================================
+
+    system_prompt = """
+You are a strict OSINT intelligence reporting assistant.
+
+You are NOT an investigator, threat classifier, ownership
+attribution engine, or external research agent.
+
+You are ONLY a reporting layer.
+
+Your output must contain observations that are directly
+supported by the supplied data.
+
+CRITICAL RULE:
+
+NEVER add an interpretation merely because it sounds reasonable.
+
+If a statement is not directly supported by the supplied data,
+DO NOT write it.
+
+NEVER use unsupported cybersecurity terminology such as:
+
+- robust
+- secure
+- trusted
+- trustworthy
+- legitimate
+- suspicious
+- malicious
+- benign
+- compromised
+- dangerous
+- safe
+- reliable
+- resilient
+- vulnerable
+- high-risk
+- low-risk
+
+unless the supplied data explicitly supports that exact
+conclusion.
+
+In particular:
+
+A large number of IP addresses does NOT mean infrastructure
+is robust.
+
+A certificate does NOT mean a domain is secure or legitimate.
+
+An organization associated with an IP address does NOT prove
+domain ownership.
+
+A VirusTotal reputation score does NOT establish whether a
+domain is malicious or benign.
+
+VirusTotal detection counts MUST always be attributed to
+VirusTotal.
+
+Preserve graph relationship direction.
 
 For example:
 
-Domain -> RESOLVES_TO -> IPAddress
-IPAddress -> BELONGS_TO_ASN -> ASN
+Domain
+    |
+    | RESOLVES_TO
+    v
+IPAddress
+    |
+    | BELONGS_TO_ASN
+    v
+ASN
 
-Therefore, describe this as:
+This must be described as:
 
 "The domain resolves to observed IP addresses, and those
 IP addresses map to the observed ASN."
 
-Do NOT state that the domain is directly associated with
-the ASN unless a direct Domain -> ASN relationship is
-explicitly present in the supplied graph data.
+NEVER simplify this into:
 
-Report only relationships explicitly represented in the
-supplied graph-derived data.
+"The domain belongs to ASN X."
+
+Likewise:
+
+Domain
+    |
+    | RESOLVES_TO
+    v
+IPAddress
+    |
+    | ASSOCIATED_WITH
+    v
+Organization
+
+must be described as an organization associated with the
+observed IP infrastructure.
+
+It must NOT be described as domain ownership.
+
+Do not invent facts, entities, relationships, IP addresses,
+subdomains, organizations, certificates, or conclusions.
+
+Do not perform external lookups.
+
+Do not use external knowledge.
+
+Do not create additional sections.
+
+Do not rename the required sections.
+
+Return only the requested report.
+"""
+
+    # ========================================================
+    # BUILD USER PROMPT
+    # ========================================================
+
+    prompt = f"""
+Generate an OSINT intelligence report using ONLY the data
+provided below.
+
+============================================================
+DOMAIN
+============================================================
+
+{domain}
+
+============================================================
+GRAPH STATISTICS
+============================================================
+
+Observed subdomains:
+{statistics.get("subdomains", 0)}
+
+Observed IP addresses:
+{statistics.get("ip_addresses", 0)}
+
+Observed ASNs:
+{statistics.get("asns", 0)}
+
+Observed organizations:
+{statistics.get("organizations", 0)}
+
+Observed certificates:
+{statistics.get("certificates", 0)}
+
+============================================================
+IP VERSION DISTRIBUTION
+============================================================
+
+IPv4:
+{ipv4_count}
+
+IPv6:
+{ipv6_count}
+
+Unknown:
+{unknown_ip_count}
+
+============================================================
+GRAPH RELATIONSHIP COUNTS
+============================================================
+
+{relationships_text}
+
+============================================================
+GRAPH-DERIVED OBSERVATIONS
+============================================================
+
+{observations_text}
+
+============================================================
+OBSERVED IP ADDRESSES
+============================================================
+
+{format_list(ip_addresses)}
+
+============================================================
+OBSERVED ASNs
+============================================================
+
+{format_list(asns)}
+
+============================================================
+OBSERVED ORGANIZATIONS
+============================================================
+
+{format_list(organizations)}
+
+============================================================
+OBSERVED CERTIFICATES
+============================================================
+
+{format_list(certificates)}
+
+============================================================
+OBSERVED SUBDOMAINS
+============================================================
+
+Only the first 20 observed subdomains are supplied.
+
+Do not reproduce the complete subdomain list.
+
+{format_list(subdomains[:20])}
+
+============================================================
+VIRUSTOTAL INTELLIGENCE
+============================================================
+
+{virustotal_text}
+
+============================================================
+REPORT FORMAT
+============================================================
+
+Produce EXACTLY these six sections.
+
+1. Domain Infrastructure
+
+Describe:
+- observed domain
+- observed subdomain count
+- observed IP address count
+- IPv4/IPv6 distribution
+- directly supported infrastructure observations
+
+If ASN or organization information is mentioned, describe it
+through the observed IP infrastructure.
+
+Do NOT imply a direct Domain -> ASN relationship.
+
+Do NOT imply a direct Domain -> Organization relationship.
+
+------------------------------------------------------------
+
+2. Network Relationships
+
+Describe the observed graph relationships involving:
+
+Domain
+IP addresses
+ASNs
+
+Preserve relationship direction.
+
+Example:
+
+"The domain resolves to observed IP addresses, and those
+IP addresses map to the observed ASN."
+
+Do NOT write:
+
+"The domain belongs to ASN X."
+
+------------------------------------------------------------
 
 3. Organizational Associations
 
 Describe organizations associated with the observed IP
 infrastructure.
 
-IMPORTANT:
+Explicitly state that IP-organization association does not
+establish domain ownership.
 
-Association with an IP address does not establish domain
-ownership.
+------------------------------------------------------------
 
 4. Certificate Observations
 
-Describe the number and identifiers of certificates associated
-with the domain through the observed graph relationships.
+Describe:
+- number of observed certificates
+- certificate identifiers where useful
+- their observed relationship with the domain
 
-Do not infer security, validity, trustworthiness, or ownership
-from certificate presence or certificate count alone.
+Do NOT infer:
+- security
+- trust
+- legitimacy
+- ownership
+- validity
+
+from certificate presence alone.
+
+------------------------------------------------------------
 
 5. Notable Patterns
 
-Describe only patterns explicitly identified by the graph
-analysis.
+Describe only patterns explicitly supported by the data.
 
-Examples include:
-
-- Numeric-leading subdomains
-- Hyphenated subdomains
-- Multi-level subdomains
-- Common subdomain prefixes
-- IPv4 and IPv6 distribution
+These may include:
+- numeric-leading subdomains
+- hyphenated subdomains
+- multi-level subdomains
+- common prefixes
+- IPv4/IPv6 distribution
 - ASN concentration
-- Organization count
-- Certificate count
+- organization count
+- certificate count
+- VirusTotal detection counts
+- VirusTotal reputation
+- registrar information
 
-Do not infer maliciousness, benignness, ownership, intent,
-reputation, or security characteristics from these patterns.
+VirusTotal information MUST explicitly be attributed to
+VirusTotal.
+
+Do NOT interpret VirusTotal values as an independent
+determination of maliciousness or benignness.
+
+------------------------------------------------------------
 
 6. Key Takeaways
 
-Provide 3-5 concise points summarizing the most important
-directly observed facts from the previous sections.
+Provide 3-5 concise points containing only directly observed
+facts.
 
-Do not introduce new information or unsupported conclusions.
-
-After the six sections, provide a short limitation statement
-explaining that the report reflects only the collected OSINT
-data and does not establish ownership, maliciousness,
-benignness, or security posture.
+Do not introduce new information.
 
 ============================================================
-
-FINAL OUTPUT REQUIREMENTS
+LIMITATION
 ============================================================
 
-- Use exactly the six section headings specified above.
-- Do not add additional sections.
-- Do not rename any section.
-- Do not include information that is not present in the
-  supplied graph-analysis data.
-- Clearly distinguish observations from interpretation.
-- If something cannot be determined from the supplied data,
-  say so explicitly.
-- Return ONLY the report.
+After the six sections, provide ONE short limitation statement.
+
+Do not create a heading for it.
+
+State that the report reflects only the collected OSINT data
+and does not independently establish:
+
+- domain ownership
+- maliciousness
+- benignness
+- compromise
+- security posture
+
+============================================================
+FINAL RULE
+============================================================
+
+Return ONLY the report.
+
+Exactly six section headings.
+
+No additional headings.
+
+No unsupported conclusions.
+
+No external information.
+
+No complete subdomain list.
+
+No ownership claims.
+
+No maliciousness claims.
+
+No benignness claims.
+
+No compromise claims.
+
+No security-posture claims.
+
+Do NOT describe the infrastructure as robust.
+
+Do NOT describe the infrastructure as secure.
+
+Do NOT describe the infrastructure as trusted.
+
+Do NOT describe the infrastructure as suspicious.
+
+Do NOT describe the infrastructure as malicious.
+
+Do NOT describe the infrastructure as benign.
 """
+
+    # ========================================================
+    # CALL LOCAL OLLAMA MODEL
+    # ========================================================
 
     response = ollama.chat(
         model="llama3.2:3b",
         messages=[
             {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        options={
+            "temperature": 0
+        }
     )
 
-    return response["message"]["content"]
+    # ========================================================
+    # EXTRACT RESPONSE
+    # ========================================================
+
+    report = response.get(
+        "message",
+        {}
+    ).get(
+        "content",
+        ""
+    )
+
+    if not report:
+        raise RuntimeError(
+            "Ollama returned an empty report."
+        )
+
+    report = report.strip()
+
+    # ========================================================
+    # POST-GENERATION VALIDATION
+    # ========================================================
+
+    # These terms should never appear unless explicitly
+    # supported by a future controlled validation layer.
+    forbidden_phrases = [
+        "robust",
+        "secure",
+        "trusted",
+        "trustworthy",
+        "legitimate",
+        "compromised",
+        "dangerous",
+        "safe",
+        "resilient",
+        "vulnerable",
+        "high-risk",
+        "low-risk"
+    ]
+
+    report_lower = report.lower()
+
+    detected_forbidden = [
+        phrase
+        for phrase in forbidden_phrases
+        if phrase in report_lower
+    ]
+
+    if detected_forbidden:
+        raise RuntimeError(
+            "AI report contained unsupported terminology: "
+            + ", ".join(detected_forbidden)
+        )
+
+    # ========================================================
+    # VALIDATE REQUIRED HEADINGS
+    # ========================================================
+
+    required_headings = [
+        "Domain Infrastructure",
+        "Network Relationships",
+        "Organizational Associations",
+        "Certificate Observations",
+        "Notable Patterns",
+        "Key Takeaways"
+    ]
+
+    missing_headings = [
+        heading
+        for heading in required_headings
+        if heading.lower() not in report.lower()
+    ]
+
+    if missing_headings:
+        raise RuntimeError(
+            "AI report is missing required sections: "
+            + ", ".join(missing_headings)
+        )
+
+    return report
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# ================================================================
+# COMMAND-LINE EXECUTION
+# ================================================================
 
 if __name__ == "__main__":
 
-    domain = input("Enter domain: ").strip()
+    domain = input(
+        "Enter domain: "
+    ).strip()
 
-    password = input("Enter Neo4j password: ")
+    password = input(
+        "Enter Neo4j password: "
+    )
 
-    print("\n[*] Generating AI-assisted analysis...\n")
+    print(
+        "\n[*] Analyzing graph..."
+    )
 
     try:
+
+        # --------------------------------------------------------
+        # GET GRAPH ANALYSIS
+        # --------------------------------------------------------
 
         analysis = get_domain_analysis(
             domain,
@@ -268,11 +753,17 @@ if __name__ == "__main__":
 
         else:
 
-            print("[+] Graph analysis complete.")
+            print(
+                "[+] Graph analysis complete."
+            )
 
             print(
                 "\n[*] Generating AI-assisted analysis...\n"
             )
+
+            # ----------------------------------------------------
+            # GENERATE REPORT
+            # ----------------------------------------------------
 
             report = generate_ai_report(
                 analysis
@@ -282,17 +773,23 @@ if __name__ == "__main__":
                 "[+] AI analysis complete.\n"
             )
 
-            print("=" * 60)
-
             print(
-                "AI-ASSISTED INTELLIGENCE SUMMARY"
+                "=" * 70
             )
 
-            print("=" * 60)
+            print(
+                "AI-ASSISTED INTELLIGENCE REPORT"
+            )
+
+            print(
+                "=" * 70
+            )
 
             print(report)
 
-            print("=" * 60)
+            print(
+                "=" * 70
+            )
 
     except Exception as error:
 

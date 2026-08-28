@@ -5,15 +5,17 @@ from backend.validation.domain_validator import validate_domain
 
 from backend.collectors.dns_collector import get_dns_records
 from backend.collectors.subdomain_collector import get_subdomains
+from backend.collectors.amass_collector import get_amass_subdomains
 from backend.collectors.certificate_collector import get_certificates
 from backend.collectors.ip_metadata_collector import get_all_ip_metadata
+from backend.collectors.virus_total_collector import collect_virustotal_domain
 
 
 def collect_domain_osint(domain):
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 1. DOMAIN INPUT & VALIDATION
-    # ---------------------------------------------------------
+    # =========================================================
 
     print("[*] Validating domain...")
 
@@ -26,9 +28,9 @@ def collect_domain_osint(domain):
 
     print(f"[+] Domain validated: {domain}")
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 2. INITIALIZE RESULTS
-    # ---------------------------------------------------------
+    # =========================================================
 
     results = {
         "domain": domain,
@@ -36,75 +38,234 @@ def collect_domain_osint(domain):
         "ips": [],
         "ip_metadata": [],
         "subdomains": [],
-        "certificates": []
+        "certificates": [],
+        "virustotal": {}
     }
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 3. DNS COLLECTION
-    # ---------------------------------------------------------
+    # =========================================================
 
     print("\n[*] Collecting DNS records...")
 
     results["dns_records"] = get_dns_records(domain)
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 4. IP EXTRACTION
-    # ---------------------------------------------------------
+    # =========================================================
 
     results["ips"] = (
         results["dns_records"].get("A", [])
         + results["dns_records"].get("AAAA", [])
     )
 
-    print(f"[+] IP addresses found: {len(results['ips'])}")
+    # Remove duplicate IP addresses while preserving order
+    results["ips"] = list(
+        dict.fromkeys(results["ips"])
+    )
 
-    # ---------------------------------------------------------
+    print(
+        f"[+] IP addresses found: {len(results['ips'])}"
+    )
+
+    # =========================================================
     # 5. IP METADATA COLLECTION
-    # ---------------------------------------------------------
+    # =========================================================
 
     print("\n[*] Collecting IP metadata...")
 
-    results["ip_metadata"] = get_all_ip_metadata(results["ips"])
+    results["ip_metadata"] = get_all_ip_metadata(
+        results["ips"]
+    )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # 6. SUBDOMAIN COLLECTION
-    # ---------------------------------------------------------
+    # =========================================================
 
     print("\n[*] Collecting subdomains...")
 
-    results["subdomains"] = get_subdomains(domain)
+    # ---------------------------------------------------------
+    # Subfinder
+    # ---------------------------------------------------------
 
-    print(f"[+] Subdomains found: {len(results['subdomains'])}")
+    print("[*] Running Subfinder...")
+
+    subfinder_subdomains = get_subdomains(domain)
+
+    print(
+        f"[+] Subfinder found: "
+        f"{len(subfinder_subdomains)}"
+    )
 
     # ---------------------------------------------------------
-    # 7. CERTIFICATE COLLECTION
+    # Amass
     # ---------------------------------------------------------
+
+    print("[*] Running Amass...")
+
+    amass_subdomains = get_amass_subdomains(domain)
+
+    print(
+        f"[+] Amass found: "
+        f"{len(amass_subdomains)}"
+    )
+
+    # =========================================================
+    # 7. COMBINE & PRESERVE SUBDOMAIN SOURCES
+    # =========================================================
+
+    subdomain_sources = {}
+
+    # ---------------------------------------------------------
+    # Subfinder results
+    # ---------------------------------------------------------
+
+    for subdomain in subfinder_subdomains:
+
+        if not isinstance(subdomain, str):
+            continue
+
+        subdomain = subdomain.strip()
+
+        if not subdomain:
+            continue
+
+        if subdomain not in subdomain_sources:
+            subdomain_sources[subdomain] = []
+
+        if "Subfinder" not in subdomain_sources[subdomain]:
+            subdomain_sources[subdomain].append("Subfinder")
+
+    # ---------------------------------------------------------
+    # Amass results
+    # ---------------------------------------------------------
+
+    for subdomain in amass_subdomains:
+
+        if not isinstance(subdomain, str):
+            continue
+
+        subdomain = subdomain.strip()
+
+        if not subdomain:
+            continue
+
+        if subdomain not in subdomain_sources:
+            subdomain_sources[subdomain] = []
+
+        if "Amass" not in subdomain_sources[subdomain]:
+            subdomain_sources[subdomain].append("Amass")
+
+    # =========================================================
+    # FINAL SOURCE-AWARE SUBDOMAIN LIST
+    # =========================================================
+
+    results["subdomains"] = [
+        {
+            "subdomain": subdomain,
+            "sources": sources
+        }
+        for subdomain, sources
+        in sorted(subdomain_sources.items())
+    ]
+
+    # =========================================================
+    # CORRELATION STATISTICS
+    # =========================================================
+
+    common_subdomains = [
+        subdomain
+        for subdomain, sources
+        in subdomain_sources.items()
+        if len(sources) > 1
+    ]
+
+    print(
+        f"[+] Unique subdomains found: "
+        f"{len(results['subdomains'])}"
+    )
+
+    print(
+        f"[+] Subdomains found by both sources: "
+        f"{len(common_subdomains)}"
+    )
+
+    # =========================================================
+    # 8. CERTIFICATE COLLECTION
+    # =========================================================
 
     print("\n[*] Collecting certificates...")
 
     results["certificates"] = get_certificates(domain)
 
-    print(f"[+] Certificates found: {len(results['certificates'])}")
+    print(
+        f"[+] Certificates found: "
+        f"{len(results['certificates'])}"
+    )
+
+    # =========================================================
+    # 9. VIRUSTOTAL COLLECTION
+    # =========================================================
+
+    print("\n[*] Collecting VirusTotal intelligence...")
+
+    results["virustotal"] = collect_virustotal_domain(
+        domain
+    )
+
+    print("[+] VirusTotal lookup complete.")
+
+    # =========================================================
+    # 10. RETURN RESULTS
+    # =========================================================
 
     return results
 
 
+# =============================================================
+# STANDALONE EXECUTION
+# =============================================================
+
 if __name__ == "__main__":
 
-    domain = input("Enter domain: ").strip()
+    domain = input(
+        "Enter domain: "
+    ).strip()
 
-    print("\n[*] Starting OSINT collection...\n")
+    print(
+        "\n[*] Starting OSINT collection...\n"
+    )
 
     try:
 
-        results = collect_domain_osint(domain)
+        results = collect_domain_osint(
+            domain
+        )
 
-        output_directory = Path("data/raw")
-        output_directory.mkdir(parents=True, exist_ok=True)
+        # =====================================================
+        # SAVE RAW DATA
+        # =====================================================
 
-        output_file = output_directory / f"{results['domain']}.json"
+        output_directory = Path(
+            "data/raw"
+        )
 
-        with open(output_file, "w", encoding="utf-8") as file:
+        output_directory.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        output_file = (
+            output_directory
+            / f"{results['domain']}.json"
+        )
+
+        with open(
+            output_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
             json.dump(
                 results,
                 file,
@@ -112,13 +273,25 @@ if __name__ == "__main__":
                 ensure_ascii=False
             )
 
-        print("\n[+] Collection complete.")
-        print(f"[+] Results saved to: {output_file}")
+        print(
+            "\n[+] Collection complete."
+        )
+
+        print(
+            f"[+] Results saved to: "
+            f"{output_file}"
+        )
 
     except ValueError as error:
 
-        print(f"\n[!] Domain validation failed: {error}")
+        print(
+            f"\n[!] Domain validation failed: "
+            f"{error}"
+        )
 
     except Exception as error:
 
-        print(f"\n[!] Collection error: {error}")
+        print(
+            f"\n[!] Collection error: "
+            f"{error}"
+        )

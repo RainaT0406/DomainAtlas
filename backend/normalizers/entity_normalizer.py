@@ -3,9 +3,17 @@ import os
 from datetime import datetime, timezone
 
 
+# =============================================================
+# TIMESTAMP
+# =============================================================
+
 def current_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
+
+# =============================================================
+# ADD ENTITY
+# =============================================================
 
 def add_entity(
     entities,
@@ -24,7 +32,10 @@ def add_entity(
     if not value:
         return
 
-    key = (entity_type, value)
+    key = (
+        entity_type,
+        value
+    )
 
     provenance = {
         "source": source,
@@ -32,26 +43,39 @@ def add_entity(
         "recorded_at": recorded_at
     }
 
-    # Entity already exists
+    # ---------------------------------------------------------
+    # ENTITY ALREADY EXISTS
+    # ---------------------------------------------------------
+
     if key in entity_index:
+
         entity = entity_index[key]
 
-        # Avoid duplicate provenance entries
         if provenance not in entity["provenance"]:
             entity["provenance"].append(provenance)
 
         return
 
-    # New entity
+    # ---------------------------------------------------------
+    # NEW ENTITY
+    # ---------------------------------------------------------
+
     entity = {
         "type": entity_type,
         "value": value,
-        "provenance": [provenance]
+        "provenance": [
+            provenance
+        ]
     }
 
     entities.append(entity)
+
     entity_index[key] = entity
 
+
+# =============================================================
+# ADD RELATIONSHIP
+# =============================================================
 
 def add_relationship(
     relationships,
@@ -68,12 +92,15 @@ def add_relationship(
     if not from_value or not to_value:
         return
 
+    from_value = str(from_value).strip()
+    to_value = str(to_value).strip()
+
     relationship_key = (
         from_type,
-        str(from_value),
+        from_value,
         relationship,
         to_type,
-        str(to_value)
+        to_value
     )
 
     provenance = {
@@ -82,31 +109,55 @@ def add_relationship(
         "recorded_at": recorded_at
     }
 
-    # Relationship already exists
+    # ---------------------------------------------------------
+    # RELATIONSHIP ALREADY EXISTS
+    # ---------------------------------------------------------
+
     if relationship_key in relationship_index:
-        existing_relationship = relationship_index[relationship_key]
+
+        existing_relationship = (
+            relationship_index[relationship_key]
+        )
 
         if provenance not in existing_relationship["provenance"]:
-            existing_relationship["provenance"].append(provenance)
+            existing_relationship["provenance"].append(
+                provenance
+            )
 
         return
+
+    # ---------------------------------------------------------
+    # NEW RELATIONSHIP
+    # ---------------------------------------------------------
 
     new_relationship = {
         "from": {
             "type": from_type,
-            "value": str(from_value)
+            "value": from_value
         },
+
         "relationship": relationship,
+
         "to": {
             "type": to_type,
-            "value": str(to_value)
+            "value": to_value
         },
-        "provenance": [provenance]
+
+        "provenance": [
+            provenance
+        ]
     }
 
     relationships.append(new_relationship)
-    relationship_index[relationship_key] = new_relationship
 
+    relationship_index[relationship_key] = (
+        new_relationship
+    )
+
+
+# =============================================================
+# NORMALIZE DATA
+# =============================================================
 
 def normalize_data(data):
 
@@ -121,11 +172,12 @@ def normalize_data(data):
     # One timestamp for this normalization run.
     recorded_at = current_timestamp()
 
-    # ---------------------------------------------------------
+    # =========================================================
     # DOMAIN
-    # ---------------------------------------------------------
+    # =========================================================
 
     if domain:
+
         add_entity(
             entities,
             entity_index,
@@ -136,45 +188,157 @@ def normalize_data(data):
             recorded_at
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # SUBDOMAINS
-    # ---------------------------------------------------------
+    # =========================================================
 
-    for subdomain in data.get("subdomains", []):
+    for subdomain_data in data.get("subdomains", []):
 
-        if not isinstance(subdomain, str):
-            continue
+        # -----------------------------------------------------
+        # NEW SOURCE-AWARE FORMAT
+        #
+        # {
+        #     "subdomain": "www.example.com",
+        #     "sources": ["Subfinder", "Amass"]
+        # }
+        # -----------------------------------------------------
 
-        add_entity(
-            entities,
-            entity_index,
-            "Subdomain",
-            subdomain,
-            "Subdomain Enumeration",
-            "Subdomain discovery",
-            recorded_at
-        )
+        if isinstance(subdomain_data, dict):
 
-        add_relationship(
-            relationships,
-            relationship_index,
-            "Domain",
-            domain,
-            "HAS_SUBDOMAIN",
-            "Subdomain",
-            subdomain,
-            "Subdomain Enumeration",
-            "Subdomain discovery",
-            recorded_at
-        )
+            subdomain = subdomain_data.get("subdomain")
 
-    # ---------------------------------------------------------
+            sources = subdomain_data.get(
+                "sources",
+                []
+            )
+
+            if not isinstance(sources, list):
+                sources = []
+
+            if not subdomain:
+                continue
+
+            # -------------------------------------------------
+            # Add Subdomain Entity
+            # -------------------------------------------------
+
+            # If both tools found it, preserve both as
+            # separate provenance records.
+
+            if sources:
+
+                for source in sources:
+
+                    add_entity(
+                        entities,
+                        entity_index,
+                        "Subdomain",
+                        subdomain,
+                        source,
+                        "Subdomain discovery",
+                        recorded_at
+                    )
+
+            else:
+
+                add_entity(
+                    entities,
+                    entity_index,
+                    "Subdomain",
+                    subdomain,
+                    "Subdomain Enumeration",
+                    "Subdomain discovery",
+                    recorded_at
+                )
+
+            # -------------------------------------------------
+            # Domain → Subdomain
+            # -------------------------------------------------
+
+            if sources:
+
+                for source in sources:
+
+                    add_relationship(
+                        relationships,
+                        relationship_index,
+                        "Domain",
+                        domain,
+                        "HAS_SUBDOMAIN",
+                        "Subdomain",
+                        subdomain,
+                        source,
+                        "Subdomain discovery",
+                        recorded_at
+                    )
+
+            else:
+
+                add_relationship(
+                    relationships,
+                    relationship_index,
+                    "Domain",
+                    domain,
+                    "HAS_SUBDOMAIN",
+                    "Subdomain",
+                    subdomain,
+                    "Subdomain Enumeration",
+                    "Subdomain discovery",
+                    recorded_at
+                )
+
+        # -----------------------------------------------------
+        # BACKWARD COMPATIBILITY
+        #
+        # Supports old format:
+        #
+        # "subdomains": [
+        #     "www.example.com"
+        # ]
+        # -----------------------------------------------------
+
+        elif isinstance(subdomain_data, str):
+
+            subdomain = subdomain_data.strip()
+
+            if not subdomain:
+                continue
+
+            add_entity(
+                entities,
+                entity_index,
+                "Subdomain",
+                subdomain,
+                "Subdomain Enumeration",
+                "Subdomain discovery",
+                recorded_at
+            )
+
+            add_relationship(
+                relationships,
+                relationship_index,
+                "Domain",
+                domain,
+                "HAS_SUBDOMAIN",
+                "Subdomain",
+                subdomain,
+                "Subdomain Enumeration",
+                "Subdomain discovery",
+                recorded_at
+            )
+
+    # =========================================================
     # IP ADDRESSES
-    # ---------------------------------------------------------
+    # =========================================================
 
     for ip in data.get("ips", []):
 
         if not isinstance(ip, str):
+            continue
+
+        ip = ip.strip()
+
+        if not ip:
             continue
 
         add_entity(
@@ -200,9 +364,9 @@ def normalize_data(data):
             recorded_at
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
     # IP METADATA
-    # ---------------------------------------------------------
+    # =========================================================
 
     for metadata in data.get("ip_metadata", []):
 
@@ -214,7 +378,12 @@ def normalize_data(data):
         if not ip:
             continue
 
-        # Make sure IP exists as an entity.
+        ip = str(ip).strip()
+
+        # -----------------------------------------------------
+        # Make sure IP exists
+        # -----------------------------------------------------
+
         add_entity(
             entities,
             entity_index,
@@ -225,75 +394,81 @@ def normalize_data(data):
             recorded_at
         )
 
-        # -------------------------
+        # -----------------------------------------------------
         # ASN
-        # -------------------------
+        # -----------------------------------------------------
 
         asn = metadata.get("asn")
 
-        if asn:
+        if asn is not None:
 
             asn = str(asn).strip()
 
-            add_entity(
-                entities,
-                entity_index,
-                "ASN",
-                asn,
-                "IP Metadata",
-                "IP to ASN lookup",
-                recorded_at
-            )
+            if asn:
 
-            add_relationship(
-                relationships,
-                relationship_index,
-                "IPAddress",
-                ip,
-                "BELONGS_TO_ASN",
-                "ASN",
-                asn,
-                "IP Metadata",
-                "IP to ASN lookup",
-                recorded_at
-            )
+                add_entity(
+                    entities,
+                    entity_index,
+                    "ASN",
+                    asn,
+                    "IP Metadata",
+                    "IP to ASN lookup",
+                    recorded_at
+                )
 
-        # -------------------------
+                add_relationship(
+                    relationships,
+                    relationship_index,
+                    "IPAddress",
+                    ip,
+                    "BELONGS_TO_ASN",
+                    "ASN",
+                    asn,
+                    "IP Metadata",
+                    "IP to ASN lookup",
+                    recorded_at
+                )
+
+        # -----------------------------------------------------
         # ORGANIZATION
-        # -------------------------
+        # -----------------------------------------------------
 
         organization = metadata.get("organization")
 
         if organization:
 
-            organization = str(organization).strip()
+            organization = str(
+                organization
+            ).strip()
 
-            add_entity(
-                entities,
-                entity_index,
-                "Organization",
-                organization,
-                "IP Metadata",
-                "IP organization lookup",
-                recorded_at
-            )
+            if organization:
 
-            add_relationship(
-                relationships,
-                relationship_index,
-                "IPAddress",
-                ip,
-                "ASSOCIATED_WITH",
-                "Organization",
-                organization,
-                "IP Metadata",
-                "IP organization lookup",
-                recorded_at
-            )
+                add_entity(
+                    entities,
+                    entity_index,
+                    "Organization",
+                    organization,
+                    "IP Metadata",
+                    "IP organization lookup",
+                    recorded_at
+                )
 
-    # ---------------------------------------------------------
+                add_relationship(
+                    relationships,
+                    relationship_index,
+                    "IPAddress",
+                    ip,
+                    "ASSOCIATED_WITH",
+                    "Organization",
+                    organization,
+                    "IP Metadata",
+                    "IP organization lookup",
+                    recorded_at
+                )
+
+    # =========================================================
     # CERTIFICATES
-    # ---------------------------------------------------------
+    # =========================================================
 
     for certificate in data.get("certificates", []):
 
@@ -305,9 +480,14 @@ def normalize_data(data):
         if not certificate_id:
             continue
 
-        certificate_id = str(certificate_id)
+        certificate_id = str(
+            certificate_id
+        ).strip()
 
-        # Certificate entity
+        # -----------------------------------------------------
+        # Certificate Entity
+        # -----------------------------------------------------
+
         add_entity(
             entities,
             entity_index,
@@ -318,7 +498,10 @@ def normalize_data(data):
             recorded_at
         )
 
+        # -----------------------------------------------------
         # Domain → Certificate
+        # -----------------------------------------------------
+
         add_relationship(
             relationships,
             relationship_index,
@@ -332,51 +515,305 @@ def normalize_data(data):
             recorded_at
         )
 
-    # ---------------------------------------------------------
+    # =========================================================
+    # VIRUSTOTAL INTELLIGENCE
+    # =========================================================
+    #
+    # VirusTotal observations are intentionally kept as
+    # structured attributes rather than creating nodes for
+    # every numeric/statistical field.
+    #
+    # We do NOT create:
+    #
+    # Domain → HAS_REPUTATION → 0
+    # Domain → HAS_HARMLESS_COUNT → 57
+    # Domain → HAS_UNDETECTED_COUNT → 34
+    #
+    # These are properties of a VirusTotal observation.
+    #
+    # =========================================================
+
+    virustotal_data = data.get(
+        "virustotal",
+        {}
+    )
+
+    if not isinstance(
+        virustotal_data,
+        dict
+    ):
+        virustotal_data = {}
+
+    normalized_virustotal = {}
+
+    if virustotal_data:
+
+        # -----------------------------------------------------
+        # Domain
+        # -----------------------------------------------------
+
+        normalized_virustotal["domain"] = (
+            virustotal_data.get("domain")
+            or domain
+        )
+
+        # -----------------------------------------------------
+        # Reputation
+        # -----------------------------------------------------
+
+        normalized_virustotal["reputation"] = (
+            virustotal_data.get("reputation")
+        )
+
+        # -----------------------------------------------------
+        # Analysis Statistics
+        # -----------------------------------------------------
+
+        analysis_stats = (
+            virustotal_data.get(
+                "last_analysis_stats",
+                {}
+            )
+        )
+
+        if not isinstance(
+            analysis_stats,
+            dict
+        ):
+            analysis_stats = {}
+
+        normalized_virustotal[
+            "last_analysis_stats"
+        ] = {
+
+            "malicious": analysis_stats.get(
+                "malicious",
+                0
+            ),
+
+            "suspicious": analysis_stats.get(
+                "suspicious",
+                0
+            ),
+
+            "harmless": analysis_stats.get(
+                "harmless",
+                0
+            ),
+
+            "undetected": analysis_stats.get(
+                "undetected",
+                0
+            ),
+
+            "timeout": analysis_stats.get(
+                "timeout",
+                0
+            )
+        }
+
+        # -----------------------------------------------------
+        # Categories
+        # -----------------------------------------------------
+
+        categories = (
+            virustotal_data.get(
+                "categories",
+                {}
+            )
+        )
+
+        if not isinstance(
+            categories,
+            dict
+        ):
+            categories = {}
+
+        normalized_virustotal[
+            "categories"
+        ] = categories
+
+        # -----------------------------------------------------
+        # Registrar
+        # -----------------------------------------------------
+
+        normalized_virustotal[
+            "registrar"
+        ] = virustotal_data.get(
+            "registrar"
+        )
+
+        # -----------------------------------------------------
+        # Creation Date
+        # -----------------------------------------------------
+
+        normalized_virustotal[
+            "creation_date"
+        ] = virustotal_data.get(
+            "creation_date"
+        )
+
+        # -----------------------------------------------------
+        # Last Modification Date
+        # -----------------------------------------------------
+
+        normalized_virustotal[
+            "last_modification_date"
+        ] = virustotal_data.get(
+            "last_modification_date"
+        )
+
+        # -----------------------------------------------------
+        # DNS Records
+        # -----------------------------------------------------
+
+        dns_records = (
+            virustotal_data.get(
+                "last_dns_records",
+                []
+            )
+        )
+
+        if not isinstance(
+            dns_records,
+            list
+        ):
+            dns_records = []
+
+        normalized_virustotal[
+            "last_dns_records"
+        ] = dns_records
+
+        # -----------------------------------------------------
+        # Popularity Ranks
+        # -----------------------------------------------------
+
+        popularity_ranks = (
+            virustotal_data.get(
+                "popularity_ranks",
+                {}
+            )
+        )
+
+        if not isinstance(
+            popularity_ranks,
+            dict
+        ):
+            popularity_ranks = {}
+
+        normalized_virustotal[
+            "popularity_ranks"
+        ] = popularity_ranks
+
+        # -----------------------------------------------------
+        # Source Metadata
+        # -----------------------------------------------------
+
+        normalized_virustotal[
+            "source"
+        ] = "VirusTotal"
+
+        normalized_virustotal[
+            "method"
+        ] = "VirusTotal domain intelligence API"
+
+        normalized_virustotal[
+            "recorded_at"
+        ] = recorded_at
+
+    # =========================================================
     # FINAL OUTPUT
-    # ---------------------------------------------------------
+    # =========================================================
 
     return {
+
         "domain": domain,
+
         "normalized_at": recorded_at,
+
         "entities": entities,
-        "relationships": relationships
+
+        "relationships": relationships,
+
+        "virustotal": normalized_virustotal
     }
 
 
-def normalize_file(input_path, output_path):
+# =============================================================
+# NORMALIZE FILE
+# =============================================================
 
-    with open(input_path, "r", encoding="utf-8") as file:
+def normalize_file(
+    input_path,
+    output_path
+):
+
+    with open(
+        input_path,
+        "r",
+        encoding="utf-8"
+    ) as file:
+
         data = json.load(file)
 
     normalized_data = normalize_data(data)
 
-    output_directory = os.path.dirname(output_path)
+    output_directory = os.path.dirname(
+        output_path
+    )
 
     if output_directory:
-        os.makedirs(output_directory, exist_ok=True)
 
-    with open(output_path, "w", encoding="utf-8") as file:
+        os.makedirs(
+            output_directory,
+            exist_ok=True
+        )
+
+    with open(
+        output_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
         json.dump(
             normalized_data,
             file,
-            indent=2
+            indent=2,
+            ensure_ascii=False
         )
 
     return normalized_data
 
 
+# =============================================================
+# STANDALONE EXECUTION
+# =============================================================
+
 if __name__ == "__main__":
 
-    domain = input("Enter domain: ").strip()
+    domain = input(
+        "Enter domain: "
+    ).strip()
 
-    input_path = f"data/raw/{domain}.json"
-    output_path = f"data/normalized/{domain}.json"
+    input_path = (
+        f"data/raw/{domain}.json"
+    )
 
-    if not os.path.exists(input_path):
+    output_path = (
+        f"data/normalized/{domain}.json"
+    )
 
-        print(f"[!] Raw data not found: {input_path}")
-        print("[!] Run Module 1 collection first.")
+    if not os.path.exists(
+        input_path
+    ):
+
+        print(
+            f"[!] Raw data not found: {input_path}"
+        )
+
+        print(
+            "[!] Run Module 1 collection first."
+        )
 
     else:
 
@@ -385,5 +822,11 @@ if __name__ == "__main__":
             output_path
         )
 
-        print("\n[+] Entity normalization complete.")
-        print(f"[+] Normalized data saved to: {output_path}")
+        print(
+            "\n[+] Entity normalization complete."
+        )
+
+        print(
+            f"[+] Normalized data saved to: "
+            f"{output_path}"
+        )
