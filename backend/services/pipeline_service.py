@@ -3,13 +3,14 @@ from backend.normalizers.entity_normalizer import normalize_data
 from backend.graph.neo4j_loader import load_normalized_data_object
 from backend.analysis.graph_analyzer import get_domain_analysis
 from backend.analysis.ai_reporter import generate_ai_report
+from datetime import datetime
 
 
 # ============================================================
 # COMPLETE OSINT PIPELINE
 # ============================================================
 
-def run_osint_pipeline(domain, password):
+def run_osint_pipeline(domain, password, progress_callback=None, scan_id=None, is_cancelled=None):
     """
     Execute the complete Domain-Centric OSINT pipeline.
 
@@ -37,6 +38,21 @@ def run_osint_pipeline(domain, password):
     password : str
         Neo4j database password.
 
+    progress_callback : callable, optional
+        Function to call with progress updates.
+        Receives dict with:
+        - step: str (unique step identifier)
+        - label: str (human-readable step name)
+        - message: str (current action)
+        - status: str ('running', 'completed', 'failed')
+        - progress: int (0-100)
+
+    scan_id : str, optional
+        Unique identifier for the scan.
+
+    is_cancelled : callable, optional
+        Function that returns True if the scan should be cancelled.
+
     Returns
     -------
     dict
@@ -49,6 +65,52 @@ def run_osint_pipeline(domain, password):
         - ai_report
     """
 
+    def update_progress(step, label, message, status, progress):
+        """Send progress update if callback provided."""
+        update = {
+            "step": step,
+            "label": label,
+            "message": message,
+            "status": status,
+            "progress": progress,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        if progress_callback:
+            progress_callback(update)
+        
+        print(f"[{progress:3d}%] [{status:9s}] {label}: {message}")
+
+    def check_cancelled():
+        """Check if the scan has been cancelled."""
+        if is_cancelled and is_cancelled():
+            print("\n[!] Scan cancelled by user.")
+            return True
+        return False
+
+    # ============================================================
+    # 0. INITIALIZATION
+    # ============================================================
+
+    print("\n" + "=" * 60)
+    print("DOMAIN-CENTRIC OSINT PIPELINE")
+    print("=" * 60)
+
+    if scan_id:
+        print(f"[*] Scan ID: {scan_id}")
+
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "init",
+        "Initialization",
+        "Pipeline started",
+        "completed",
+        5
+    )
+
     # ============================================================
     # 1. OSINT COLLECTION
     # ============================================================
@@ -57,7 +119,40 @@ def run_osint_pipeline(domain, password):
     print("STEP 1 - OSINT COLLECTION")
     print("=" * 60)
 
-    raw_data = collect_domain_osint(domain)
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    # OSINT Collection (with progress from collection_service)
+    raw_data = collect_domain_osint(
+        domain,
+        progress_callback=progress_callback,
+        is_cancelled=is_cancelled  # Pass cancellation check to collection_service
+    )
+
+    # Check if cancelled after collection
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    subdomain_count = len(
+        raw_data.get("subdomains", [])
+    )
+
+    # Show VirusTotal summary
+    vt_data = raw_data.get("virustotal", {})
+    if vt_data and not vt_data.get("error"):
+        vt_risk = vt_data.get("risk_score", "N/A")
+        vt_malicious = vt_data.get("security_summary", {}).get("malicious", 0)
+        print(f"[+] VirusTotal Risk Score: {vt_risk}/100")
+        print(f"[+] VirusTotal Malicious Detections: {vt_malicious}")
+
+    update_progress(
+        "collection_summary",
+        "OSINT Collection",
+        f"Collected {subdomain_count} subdomains",
+        "completed",
+        70
+    )
 
     print("\n[+] OSINT collection completed.")
 
@@ -69,16 +164,46 @@ def run_osint_pipeline(domain, password):
     print("STEP 2 - ENTITY NORMALIZATION")
     print("=" * 60)
 
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "normalization",
+        "Entity Normalization",
+        "Normalizing entities...",
+        "running",
+        75
+    )
+
     normalized_data = normalize_data(raw_data)
 
-    print(
-        f"[+] Entities generated: "
-        f"{len(normalized_data.get('entities', []))}"
+    # Check if cancelled after normalization
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    entity_count = len(
+        normalized_data.get("entities", [])
+    )
+
+    relationship_count = len(
+        normalized_data.get("relationships", [])
     )
 
     print(
-        f"[+] Relationships generated: "
-        f"{len(normalized_data.get('relationships', []))}"
+        f"[+] Entities generated: {entity_count}"
+    )
+
+    print(
+        f"[+] Relationships generated: {relationship_count}"
+    )
+
+    update_progress(
+        "normalization",
+        "Entity Normalization",
+        f"{entity_count} entities, {relationship_count} relationships",
+        "completed",
+        80
     )
 
     # ============================================================
@@ -89,12 +214,36 @@ def run_osint_pipeline(domain, password):
     print("STEP 3 - NEO4J GRAPH LOADING")
     print("=" * 60)
 
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "graph_loading",
+        "Knowledge Graph",
+        "Loading into Neo4j...",
+        "running",
+        85
+    )
+
     load_normalized_data_object(
         normalized_data,
         password
     )
 
+    # Check if cancelled after graph loading
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
     print("[+] Neo4j graph loading completed.")
+
+    update_progress(
+        "graph_loading",
+        "Knowledge Graph",
+        "Graph updated",
+        "completed",
+        90
+    )
 
     # ============================================================
     # 4. GRAPH ANALYSIS
@@ -104,10 +253,26 @@ def run_osint_pipeline(domain, password):
     print("STEP 4 - GRAPH ANALYSIS")
     print("=" * 60)
 
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "graph_analysis",
+        "Graph Analysis",
+        "Analyzing knowledge graph...",
+        "running",
+        92
+    )
+
     graph_analysis = get_domain_analysis(
         domain,
         password
     )
+
+    # Check if cancelled after graph analysis
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
 
     if graph_analysis is None:
         raise RuntimeError(
@@ -117,6 +282,14 @@ def run_osint_pipeline(domain, password):
 
     print("[+] Graph analysis completed.")
 
+    update_progress(
+        "graph_analysis",
+        "Graph Analysis",
+        "Analysis complete",
+        "completed",
+        95
+    )
+
     # ============================================================
     # 5. AI-ASSISTED REPORTING
     # ============================================================
@@ -125,15 +298,51 @@ def run_osint_pipeline(domain, password):
     print("STEP 5 - AI-ASSISTED REPORTING")
     print("=" * 60)
 
+    # Check if cancelled
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "ai_report",
+        "AI Intelligence Report",
+        "Generating AI assessment...",
+        "running",
+        97
+    )
+
     ai_report = generate_ai_report(
         graph_analysis
     )
 
+    # Check if cancelled after AI report
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
     print("[+] AI-assisted report generated.")
+
+    update_progress(
+        "ai_report",
+        "AI Intelligence Report",
+        "Report generated",
+        "completed",
+        100
+    )
 
     # ============================================================
     # 6. FINAL PIPELINE RESULT
     # ============================================================
+
+    # Final cancellation check
+    if check_cancelled():
+        return {"success": False, "message": "Scan cancelled"}
+
+    update_progress(
+        "complete",
+        "Analysis Complete",
+        f"Intelligence report for {domain} is ready",
+        "completed",
+        100
+    )
 
     return {
         "domain": domain,
@@ -279,7 +488,7 @@ if __name__ == "__main__":
             )
 
         # ========================================================
-        # VIRUSTOTAL SUMMARY
+        # VIRUSTOTAL SUMMARY (ENHANCED)
         # ========================================================
 
         print(
@@ -291,57 +500,48 @@ if __name__ == "__main__":
             {}
         )
 
-        if virustotal:
+        if virustotal and not virustotal.get("error"):
 
+            print(
+                f"  Risk Score: "
+                f"{virustotal.get('risk_score', 'N/A')}/100"
+            )
+            
             print(
                 f"  Reputation: "
-                f"{virustotal.get('reputation')}"
+                f"{virustotal.get('reputation', 'N/A')}"
             )
 
-            print(
-                f"  Malicious: "
-                f"{virustotal.get('malicious')}"
-            )
+            security_summary = virustotal.get("security_summary", {})
+            print(f"  Malicious: {security_summary.get('malicious', 0)}")
+            print(f"  Suspicious: {security_summary.get('suspicious', 0)}")
+            print(f"  Harmless: {security_summary.get('harmless', 0)}")
+            print(f"  Undetected: {security_summary.get('undetected', 0)}")
+            print(f"  Total Vendors: {security_summary.get('total_vendors', 0)}")
 
-            print(
-                f"  Suspicious: "
-                f"{virustotal.get('suspicious')}"
-            )
+            registrar = virustotal.get('registrar', 'N/A')
+            if registrar:
+                print(f"  Registrar: {registrar}")
 
-            print(
-                f"  Harmless: "
-                f"{virustotal.get('harmless')}"
-            )
+            # Show risk factors
+            risk_factors = virustotal.get('risk_factors', [])
+            if risk_factors:
+                print("\n  Risk Factors:")
+                for factor in risk_factors:
+                    print(f"    - [{factor['severity'].upper()}] {factor['description']}")
+                    for detail in factor.get('details', [])[:2]:
+                        print(f"      • {detail}")
 
-            print(
-                f"  Undetected: "
-                f"{virustotal.get('undetected')}"
-            )
+            # Show vendor breakdown
+            vendor_breakdown = virustotal.get('vendor_breakdown', [])
+            malicious_vendors = [v for v in vendor_breakdown if v['status'] == 'malicious']
+            if malicious_vendors:
+                print("\n  Malicious Vendors:")
+                for vendor in malicious_vendors[:5]:
+                    print(f"    - {vendor['vendor']}: {vendor['result']}")
 
-            print(
-                f"  Timeout: "
-                f"{virustotal.get('timeout')}"
-            )
-
-            print(
-                f"  Registrar: "
-                f"{virustotal.get('registrar')}"
-            )
-
-            print(
-                f"  Source: "
-                f"{virustotal.get('source')}"
-            )
-
-            print(
-                f"  Method: "
-                f"{virustotal.get('method')}"
-            )
-
-            print(
-                f"  Recorded At: "
-                f"{virustotal.get('recorded_at')}"
-            )
+        elif virustotal and virustotal.get("error"):
+            print(f"  Error: {virustotal['error']}")
 
         else:
 

@@ -1,5 +1,10 @@
 import io
 import os
+import asyncio
+import json
+from collections import deque
+from datetime import datetime
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -53,6 +58,32 @@ NEO4J_PASSWORD = os.getenv(
 
 
 # ============================================================
+# PROGRESS TRACKING
+# ============================================================
+
+# Global queue to store recent progress updates
+progress_queue = deque(maxlen=100)
+
+# List of active subscribers (for SSE)
+progress_subscribers = []
+
+# Store active scans
+active_scans = {}
+scan_cancelled = {}
+
+# Store detailed progress for each scan
+progress_store = {}
+
+
+def publish_progress(update):
+    """Publish progress update to all subscribers."""
+    progress_queue.append(update)
+    
+    for subscriber in progress_subscribers:
+        subscriber.append(update)
+
+
+# ============================================================
 # FASTAPI APPLICATION
 # ============================================================
 
@@ -88,6 +119,11 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     domain: str
+
+
+class StopRequest(BaseModel):
+    domain: Optional[str] = None
+    scan_id: Optional[str] = None
 
 
 # ============================================================
@@ -133,10 +169,10 @@ def get_graph_data(
         - ASN
         - Organization
         - Certificates
-        - Up to 150 Subdomains
+        - Up to 5 Subdomains
 
     IMPORTANT:
-    The 150-subdomain limit applies ONLY to visualization.
+    The 5 subdomain limit applies ONLY to visualization.
     """
 
     domain = (
@@ -264,7 +300,7 @@ def get_graph_data(
                 node_ids.add(node_id)
 
             # =================================================
-            # ADD UP TO 150 SUBDOMAINS
+            # ADD UP TO 5 SUBDOMAINS
             # =================================================
 
             subdomain_query = """
@@ -277,7 +313,7 @@ def get_graph_data(
                 elementId(s) AS id,
                 s.value AS value
 
-            LIMIT 150
+            LIMIT 5
             """
 
             subdomain_result = session.run(
@@ -694,6 +730,135 @@ def health():
 
 
 # ============================================================
+# PROGRESS STREAM (Server-Sent Events)
+# ============================================================
+
+@app.get("/analyze/progress")
+async def analyze_progress():
+    """
+    Stream progress updates using Server-Sent Events.
+    """
+    async def event_generator():
+        subscriber = deque(maxlen=10)
+        progress_subscribers.append(subscriber)
+        
+        try:
+            # Send any existing progress
+            for update in progress_queue:
+                yield f"data: {json.dumps(update)}\n\n"
+            
+            # Send updates as they happen
+            while True:
+                if subscriber:
+                    update = subscriber.popleft()
+                    yield f"data: {json.dumps(update)}\n\n"
+                else:
+                    await asyncio.sleep(0.1)
+        finally:
+            progress_subscribers.remove(subscriber)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ============================================================
+# GET PROGRESS BY SCAN ID
+# ============================================================
+
+@app.get("/analyze/progress/{scan_id}")
+async def get_progress_by_scan_id(scan_id: str):
+    """
+    Get detailed progress for a specific scan.
+    """
+    print(f"[DEBUG] Progress request for scan_id: {scan_id}")
+    
+    # Check if we have detailed progress
+    if scan_id in progress_store:
+        print(f"[DEBUG] Found in progress_store: {progress_store[scan_id].get('progress', 0)}%")
+        return progress_store[scan_id]
+    
+    # Fallback to active_scans
+    if scan_id in active_scans:
+        print(f"[DEBUG] Found in active_scans: {active_scans[scan_id].get('progress', 0)}%")
+        return {
+            "progress": active_scans[scan_id].get("progress", 0),
+            "status": active_scans[scan_id].get("status", "running"),
+            "steps": {},
+            "domain": active_scans[scan_id].get("domain", "")
+        }
+    
+    print(f"[DEBUG] scan_id {scan_id} not found")
+    raise HTTPException(status_code=404, detail="Scan not found")
+
+
+# ============================================================
+# STOP ANALYSIS
+# ============================================================
+
+@app.post("/analyze/stop")
+async def stop_analysis(request: StopRequest):
+    """
+    Stop an ongoing domain analysis scan.
+    """
+    try:
+        domain = request.domain
+        scan_id = request.scan_id
+        
+        print(f"[*] Stop request received: domain={domain}, scan_id={scan_id}")
+        
+        # Mark all scans for this domain as cancelled
+        if domain:
+            cancelled_count = 0
+            for sid in list(active_scans.keys()):
+                if active_scans[sid].get("domain") == domain:
+                    scan_cancelled[sid] = True
+                    cancelled_count += 1
+                    print(f"[*] Cancelled scan {sid} for domain {domain}")
+                    # Update progress_store
+                    if sid in progress_store:
+                        progress_store[sid]["status"] = "cancelled"
+                        progress_store[sid]["progress"] = 0
+            
+            if cancelled_count > 0:
+                return {"success": True, "message": f"Cancelled {cancelled_count} scan(s) for {domain}"}
+        
+        if scan_id and scan_id in active_scans:
+            scan_cancelled[scan_id] = True
+            if scan_id in progress_store:
+                progress_store[scan_id]["status"] = "cancelled"
+                progress_store[scan_id]["progress"] = 0
+            print(f"[*] Cancelled scan {scan_id}")
+            return {"success": True, "message": f"Stop signal sent for scan {scan_id}"}
+        
+        return {"success": True, "message": "Stop signal received"}
+        
+    except Exception as e:
+        print(f"[!] Error stopping scan: {e}")
+        return {"success": True, "message": f"Stop signal received (error: {str(e)})"}
+
+
+# ============================================================
+# GET SCAN STATUS
+# ============================================================
+
+@app.get("/analyze/status/{scan_id}")
+async def get_scan_status(scan_id: str):
+    """
+    Get current status of a scan.
+    """
+    if scan_id in active_scans:
+        return active_scans[scan_id]
+    raise HTTPException(status_code=404, detail="Scan not found")
+
+
+# ============================================================
 # DOWNLOAD COMPLETE SUBDOMAIN PDF
 # ============================================================
 
@@ -858,6 +1023,28 @@ def analyze_domain(
     try:
 
         # ====================================================
+        # GENERATE SCAN ID
+        # ====================================================
+
+        scan_id = f"{domain}_{datetime.now().timestamp()}"
+        active_scans[scan_id] = {
+            "domain": domain,
+            "status": "running",
+            "progress": 0,
+            "started_at": datetime.now().isoformat()
+        }
+        scan_cancelled[scan_id] = False
+        
+        # IMPORTANT: Initialize progress_store for this scan
+        progress_store[scan_id] = {
+            "domain": domain,
+            "progress": 0,
+            "status": "running",
+            "steps": {}
+        }
+        print(f"[DEBUG] Initialized progress_store for scan_id: {scan_id}")
+
+        # ====================================================
         # RUN OSINT PIPELINE
         # ====================================================
 
@@ -866,13 +1053,78 @@ def analyze_domain(
         print(
             f"[*] Starting analysis for: {domain}"
         )
+        print(f"[*] Scan ID: {scan_id}")
 
         print("=" * 60)
 
+        # Define progress callback
+        def progress_callback(update):
+            print(f"[DEBUG] progress_callback called: {update.get('step')} - {update.get('progress')}%")
+            
+            # Check if cancelled
+            if scan_cancelled.get(scan_id, False):
+                print(f"[DEBUG] Scan {scan_id} cancelled, ignoring update")
+                return
+            
+            # Update progress tracking
+            progress_value = update.get("progress", 0)
+            active_scans[scan_id]["progress"] = progress_value
+            
+            # Update progress store
+            if scan_id in progress_store:
+                progress_store[scan_id]["progress"] = progress_value
+                progress_store[scan_id]["status"] = update.get("status", "running")
+                step = update.get("step")
+                if step:
+                    progress_store[scan_id]["steps"][step] = update
+                print(f"[DEBUG] Updated progress_store[{scan_id}] to {progress_value}%")
+            else:
+                # Fallback: initialize it if missing
+                print(f"[DEBUG] WARNING: scan_id {scan_id} not in progress_store! Initializing...")
+                progress_store[scan_id] = {
+                    "domain": domain,
+                    "progress": progress_value,
+                    "status": "running",
+                    "steps": {}
+                }
+                if update.get("step"):
+                    progress_store[scan_id]["steps"][update.get("step")] = update
+            
+            publish_progress(update)
+
+        # Check if cancelled before starting
+        if scan_cancelled.get(scan_id, False):
+            active_scans[scan_id]["status"] = "cancelled"
+            if scan_id in progress_store:
+                progress_store[scan_id]["status"] = "cancelled"
+            publish_progress({
+                "step": "cancelled",
+                "progress": 0,
+                "status": "cancelled",
+                "message": "Scan cancelled by user"
+            })
+            return {"success": False, "message": "Scan cancelled"}
+
         result = run_osint_pipeline(
             domain,
-            NEO4J_PASSWORD
+            NEO4J_PASSWORD,
+            progress_callback=progress_callback,
+            scan_id=scan_id,
+            is_cancelled=lambda: scan_cancelled.get(scan_id, False)
         )
+
+        # Check if cancelled during pipeline
+        if scan_cancelled.get(scan_id, False):
+            active_scans[scan_id]["status"] = "cancelled"
+            if scan_id in progress_store:
+                progress_store[scan_id]["status"] = "cancelled"
+            publish_progress({
+                "step": "cancelled",
+                "progress": 0,
+                "status": "cancelled",
+                "message": "Scan cancelled by user"
+            })
+            return {"success": False, "message": "Scan cancelled"}
 
         # ====================================================
         # GRAPH ANALYSIS
@@ -937,12 +1189,146 @@ def analyze_domain(
         )
 
         # ====================================================
+        # EXTRACT PROVENANCE
+        # ====================================================
+
+        print(
+            "[*] Extracting provenance data..."
+        )
+
+        normalized_data = result.get(
+            "normalized_data",
+            {}
+        )
+
+        # Collect provenance from entities
+        entity_provenance = []
+
+        for entity in normalized_data.get(
+            "entities",
+            []
+        ):
+
+            entity_type = entity.get(
+                "type",
+                "Entity"
+            )
+
+            entity_value = entity.get(
+                "value",
+                ""
+            )
+
+            for provenance in entity.get(
+                "provenance",
+                []
+            ):
+
+                entity_provenance.append({
+
+                    "entity_type":
+                        entity_type,
+
+                    "entity_value":
+                        entity_value,
+
+                    "source": provenance.get(
+                        "source",
+                        "Unknown"
+                    ),
+
+                    "method": provenance.get(
+                        "method",
+                        "Unknown"
+                    ),
+
+                    "recorded_at": provenance.get(
+                        "recorded_at",
+                        ""
+                    )
+                })
+
+        # Collect provenance from relationships
+        relationship_provenance = []
+
+        for relationship in normalized_data.get(
+            "relationships",
+            []
+        ):
+
+            from_entity = relationship.get(
+                "from",
+                {}
+            )
+
+            to_entity = relationship.get(
+                "to",
+                {}
+            )
+
+            relationship_type = relationship.get(
+                "relationship",
+                "RELATED_TO"
+            )
+
+            for provenance in relationship.get(
+                "provenance",
+                []
+            ):
+
+                relationship_provenance.append({
+
+                    "entity_type":
+                        "Relationship",
+
+                    "entity_value": (
+                        f"{from_entity.get('value', '')} "
+                        f"{relationship_type} "
+                        f"{to_entity.get('value', '')}"
+                    ),
+
+                    "source": provenance.get(
+                        "source",
+                        "Unknown"
+                    ),
+
+                    "method": provenance.get(
+                        "method",
+                        "Unknown"
+                    ),
+
+                    "recorded_at": provenance.get(
+                        "recorded_at",
+                        ""
+                    )
+                })
+
+        # Combine all provenance
+        all_provenance = (
+            entity_provenance
+            + relationship_provenance
+        )
+
+        print(
+            f"[+] Extracted {len(all_provenance)} "
+            "provenance records."
+        )
+
+        # Update scan status
+        active_scans[scan_id]["status"] = "completed"
+        active_scans[scan_id]["progress"] = 100
+        if scan_id in progress_store:
+            progress_store[scan_id]["status"] = "completed"
+            progress_store[scan_id]["progress"] = 100
+
+        # ====================================================
         # RESPONSE
         # ====================================================
 
         response = {
 
             "success": True,
+            "scan_id": scan_id,
 
             "domain": result.get(
                 "domain",
@@ -990,6 +1376,8 @@ def analyze_domain(
                     certificates
             },
 
+            "provenance": all_provenance,
+
             "observations": analysis.get(
                 "observations",
                 []
@@ -1015,6 +1403,9 @@ def analyze_domain(
         )
 
         print("=" * 60)
+
+        # Cleanup
+        scan_cancelled.pop(scan_id, None)
 
         return response
 
