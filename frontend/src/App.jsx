@@ -71,7 +71,6 @@ function App() {
   const graphRef = useRef(null);
   const subdomainsRef = useRef(null);
   const certificatesRef = useRef(null);
-  const provenanceRef = useRef(null);
   const aiReportRef = useRef(null);
   const heroRef = useRef(null);
 
@@ -104,7 +103,6 @@ function App() {
         { ref: graphRef, name: "graph" },
         { ref: subdomainsRef, name: "subdomains" },
         { ref: certificatesRef, name: "certificates" },
-        { ref: provenanceRef, name: "evidence" },
         { ref: aiReportRef, name: "ai" },
       ];
 
@@ -520,7 +518,7 @@ function App() {
         observations: data.observations || [],
         provenance: data.provenance || [],
         ai_report: data.ai_report || "",
-        graph: data.graph || { nodes: [], edges: [] }
+        graph: data.graph || { nodes: [], edges: [], provenance: [] }
       };
 
       setScanId(safeData.scan_id || null);
@@ -630,6 +628,7 @@ function App() {
   const graph = analysis?.graph || {
     nodes: [],
     edges: [],
+    provenance: []
   };
 
   const subdomains = Array.isArray(infrastructure?.subdomains)
@@ -1107,19 +1106,6 @@ function App() {
           </p>
 
           <button
-            className={`nav-item ${activeNav === "evidence" ? "active" : ""}`}
-            onClick={() =>
-              scrollToSection(
-                provenanceRef,
-                "evidence"
-              )
-            }
-          >
-            <Fingerprint size={17} />
-            <span>Evidence</span>
-          </button>
-
-          <button
             className={`nav-item ${activeNav === "ai" ? "active" : ""}`}
             onClick={() =>
               scrollToSection(
@@ -1401,7 +1387,7 @@ function App() {
                 <PipelineStep
                   label="DNS Resolution"
                   message="Querying DNS records"
-                  progress={20}
+                  progress={15}
                   currentProgress={currentProgress}
                   status={
                     progress.find(
@@ -1414,7 +1400,7 @@ function App() {
                 <PipelineStep
                   label="IP Metadata"
                   message="Looking up ASN and organization"
-                  progress={32}
+                  progress={25}
                   currentProgress={currentProgress}
                   status={
                     progress.find(
@@ -1427,7 +1413,7 @@ function App() {
                 <PipelineStep
                   label="Subdomain Discovery"
                   message="Running subdomain enumeration"
-                  progress={48}
+                  progress={45}
                   currentProgress={currentProgress}
                   status={
                     progress.some(
@@ -1456,7 +1442,7 @@ function App() {
                 <PipelineStep
                   label="Certificate Intelligence"
                   message="Querying Certificate Transparency"
-                  progress={55}
+                  progress={65}
                   currentProgress={currentProgress}
                   status={
                     progress.find(
@@ -1469,7 +1455,7 @@ function App() {
                 <PipelineStep
                   label="VirusTotal Intelligence"
                   message="Querying VirusTotal API"
-                  progress={65}
+                  progress={75}
                   currentProgress={currentProgress}
                   status={
                     progress.find(
@@ -1482,7 +1468,7 @@ function App() {
                 <PipelineStep
                   label="Entity Normalization"
                   message="Normalizing entities"
-                  progress={75}
+                  progress={80}
                   currentProgress={currentProgress}
                   status={
                     progress.find(
@@ -1783,7 +1769,15 @@ function App() {
                 </div>
 
                 <div className="graph-wrapper">
-                  <GraphView graph={graph} />
+                  <GraphView
+                    graph={{
+                      ...graph,
+                      provenance: provenance
+                    }}
+                    domain={analysis.domain}
+                    subdomainCount={statistics.subdomains || 0}
+                    allSubdomains={subdomains}  // <-- Add this line
+                  />
                 </div>
 
                 <div className="graph-legend">
@@ -2173,9 +2167,9 @@ function App() {
                           Risk Score
                         </div>
                         <div className="vt-risk-level">
-                          {vtRiskScore >= 70 ? 'CRITICAL' : 
-                           vtRiskScore >= 40 ? 'HIGH' : 
-                           vtRiskScore >= 20 ? 'MEDIUM' : 'LOW'}
+                          {vtRiskScore >= 70 ? 'CRITICAL' :
+                            vtRiskScore >= 40 ? 'HIGH' :
+                              vtRiskScore >= 20 ? 'MEDIUM' : 'LOW'}
                         </div>
                       </div>
 
@@ -2299,8 +2293,8 @@ function App() {
                             const total = (vtCommunityVotes.harmless || 0) + (vtCommunityVotes.malicious || 0);
                             const harmlessPct = total > 0 ? (vtCommunityVotes.harmless || 0) / total * 100 : 100;
                             return (
-                              <div 
-                                className="vt-community-fill" 
+                              <div
+                                className="vt-community-fill"
                                 style={{ width: `${harmlessPct}%` }}
                               />
                             );
@@ -2324,72 +2318,6 @@ function App() {
             </section>
 
             {/* ==================================================
-                PROVENANCE / EVIDENCE
-            ================================================== */}
-
-            <section
-              ref={provenanceRef}
-              className="panel-section"
-            >
-
-              <div className="panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      08 / PROVENANCE
-                    </p>
-
-                    <h3>
-                      Evidence & Collection Sources
-                    </h3>
-
-                    <p className="panel-description">
-                      Source, method and timestamp for
-                      every observed entity and relationship.
-                    </p>
-
-                  </div>
-
-                  <div className="panel-icon">
-                    <Fingerprint size={20} />
-                  </div>
-
-                </div>
-
-                {provenance.length > 0 ? (
-                  <div className="provenance-grid">
-                    {provenance
-                      .slice(0, 50)
-                      .map((record, index) => (
-                        <ProvenanceCard
-                          key={index}
-                          record={record}
-                          index={index}
-                        />
-                      ))}
-                  </div>
-                ) : (
-                  <div className="empty-inline">
-                    No provenance data available.
-                  </div>
-                )}
-
-                {provenance.length > 50 && (
-                  <div className="provenance-note">
-                    Showing first 50 of{" "}
-                    {provenance.length} total
-                    provenance records
-                  </div>
-                )}
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
                 AI REPORT
             ================================================== */}
 
@@ -2405,7 +2333,7 @@ function App() {
                   <div>
 
                     <p className="eyebrow">
-                      09 / AI-ASSISTED ANALYSIS
+                      08 / AI-ASSISTED ANALYSIS
                     </p>
 
                     <h3>
@@ -2664,7 +2592,7 @@ function App() {
 }
 
 // ================================================================
-// PIPELINE STEP
+// PIPELINE STEP - IMPROVED WITH REAL-TIME STATUS
 // ================================================================
 
 function PipelineStep({
@@ -2675,34 +2603,21 @@ function PipelineStep({
   status,
   isCancelled,
 }) {
-  // Determine the step state
   const isCancelledState = status === "cancelled" || isCancelled === true;
-
-  // Only check status if not cancelled
   const isComplete = status === "completed" && !isCancelledState;
   const isRunning = status === "running" && !isCancelledState;
-  const isPending = !status && !isCancelledState;
+  const isActive = currentProgress >= progress && !isComplete && !isCancelledState;
+
+  // Show the actual progress value
+  const displayProgress = isComplete ? 100 : isRunning ? currentProgress : progress;
 
   return (
-    <div
-      className={`pipeline-step ${isComplete
-        ? "completed"
-        : isRunning
-          ? "running"
-          : isPending
-            ? "pending"
-            : ""
-        } ${isCancelledState ? "cancelled" : ""}`}
-    >
-
+    <div className={`pipeline-step ${isComplete ? "completed" : isRunning ? "running" : isActive ? "active" : ""} ${isCancelledState ? "cancelled" : ""}`}>
       <div className="pipeline-step-icon">
         {isComplete ? (
           <CheckCircle2 size={16} />
         ) : isRunning ? (
-          <Loader2
-            size={16}
-            className="spin"
-          />
+          <Loader2 size={16} className="spin" />
         ) : isCancelledState ? (
           <Square size={16} />
         ) : (
@@ -2713,24 +2628,24 @@ function PipelineStep({
       <div className="pipeline-step-content">
         <strong>{label}</strong>
         <span>
-          {isComplete
-            ? "Complete"
-            : isRunning
-              ? message
-              : isCancelledState
-                ? "Cancelled"
-                : "Waiting"}
+          {isComplete ? "Complete" :
+            isRunning ? message :
+              isCancelledState ? "Cancelled" :
+                isActive ? "Processing..." :
+                  "Waiting"}
         </span>
       </div>
 
       <div className="pipeline-step-progress">
-        {isCancelledState ? "✕" : `${progress}%`}
+        {isCancelledState ? "✕" :
+          isComplete ? "✓" :
+            isRunning ? `${Math.round(currentProgress)}%` :
+              isActive ? `${Math.round(currentProgress)}%` :
+                `${progress}%`}
       </div>
-
     </div>
   );
 }
-
 // ================================================================
 // STAT CARD
 // ================================================================
@@ -2818,33 +2733,6 @@ function PatternCard({
         {label}
       </div>
 
-    </div>
-  );
-}
-
-// ================================================================
-// PROVENANCE CARD
-// ================================================================
-
-function ProvenanceCard({ record, index }) {
-  return (
-    <div className="provenance-card">
-      <div className="provenance-index">
-        #{index + 1}
-      </div>
-      <div className="provenance-content">
-        <div className="provenance-entity">
-          <span>{record.entity_type}</span>
-          <strong>{record.entity_value}</strong>
-        </div>
-        <div className="provenance-meta">
-          <span>Source: {record.source}</span>
-          <span>Method: {record.method}</span>
-          {record.recorded_at && (
-            <span>Recorded: {new Date(record.recorded_at).toLocaleDateString()}</span>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

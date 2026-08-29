@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import cytoscape from "cytoscape";
 
-function HierarchicalGraph({ graph, onNodeSelect }) {
+function HierarchicalGraph({ 
+  graph, 
+  onNodeSelect,
+  searchTerms: externalSearchTerms,
+  onSearchChange
+}) {
   const containerRef = useRef(null);
   const cyRef = useRef(null);
 
@@ -15,11 +20,16 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
     Certificate: false,
   });
 
-  const [searchTerms, setSearchTerms] = useState({
+  // Internal search state (used when external is not provided)
+  const [internalSearchTerms, setInternalSearchTerms] = useState({
     Subdomain: "",
     IPAddress: "",
     Certificate: "",
   });
+
+  // Use external search terms if provided, fallback to internal
+  const searchTerms = externalSearchTerms || internalSearchTerms;
+  const setSearchTerms = onSearchChange || setInternalSearchTerms;
 
   const [selectedNode, setSelectedNode] = useState(null);
 
@@ -27,9 +37,8 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
   // LIMIT
   // ============================================================
 
-  // Never render thousands of nodes in Cytoscape.
-  // Search can still locate a specific entity.
   const MAX_VISIBLE_ENTITIES = 5;
+  const MAX_SEARCH_RESULTS = 100;
 
   // ============================================================
   // GRAPH DATA
@@ -37,6 +46,7 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
 
   const allNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const allEdges = Array.isArray(graph?.edges) ? graph.edges : [];
+  const provenance = Array.isArray(graph?.provenance) ? graph.provenance : [];
 
   // ============================================================
   // HELPERS
@@ -111,6 +121,22 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
   };
 
   // ============================================================
+  // GET PROVENANCE FOR NODE
+  // ============================================================
+
+  const getProvenanceForNode = (nodeId) => {
+    if (!provenance || provenance.length === 0) return [];
+    
+    return provenance.filter(record => {
+      const entityValue = record.entity_value || "";
+      const nodeValue = getValue(findNodeById(nodeId)) || "";
+      return entityValue === nodeValue || 
+             entityValue.includes(nodeValue) ||
+             nodeValue.includes(entityValue);
+    });
+  };
+
+  // ============================================================
   // NODE GROUPS
   // ============================================================
 
@@ -139,7 +165,7 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
   );
 
   // ============================================================
-  // SEARCH
+  // SEARCH - Get filtered nodes (ALL matches, not just visible)
   // ============================================================
 
   const getFilteredNodes = (nodes, type) => {
@@ -150,17 +176,89 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       .toLowerCase();
 
     if (!search) {
+      // When no search, return the first N nodes (for display)
       return nodes.slice(0, MAX_VISIBLE_ENTITIES);
     }
 
+    // When searching, return ALL matches (up to 100 to prevent performance issues)
     return nodes
       .filter((node) =>
         getValue(node)
           .toLowerCase()
           .includes(search)
       )
-      .slice(0, MAX_VISIBLE_ENTITIES);
+      .slice(0, MAX_SEARCH_RESULTS);
   };
+
+  // ============================================================
+  // GET DISPLAY INFO FOR GROUP NODE
+  // ============================================================
+
+  const getGroupLabel = (type, totalCount) => {
+    const search = String(searchTerms[type] ?? "").trim().toLowerCase();
+    const hasSearch = search.length > 0;
+    
+    let nodes;
+    if (type === "Subdomain") nodes = subdomainNodes;
+    else if (type === "IPAddress") nodes = ipNodes;
+    else if (type === "Certificate") nodes = certificateNodes;
+    else return `${type.toUpperCase()}\n${totalCount} discovered`;
+    
+    const filteredNodes = getFilteredNodes(nodes, type);
+    const displayCount = filteredNodes.length;
+    
+    let label = `${type.toUpperCase()}\n${totalCount} discovered`;
+    
+    if (hasSearch) {
+      if (displayCount === 0) {
+        label += `\nNo matches found`;
+      } else if (displayCount === 1) {
+        label += `\n1 match found`;
+      } else {
+        label += `\n${displayCount} matches found`;
+      }
+    } else {
+      if (totalCount > MAX_VISIBLE_ENTITIES) {
+        label += `\nShowing first ${MAX_VISIBLE_ENTITIES}`;
+      } else if (totalCount > 0) {
+        label += `\nShowing all ${totalCount}`;
+      }
+    }
+    
+    return label;
+  };
+
+  // ============================================================
+  // SEARCH RESULTS - For the list display
+  // ============================================================
+
+  const getSearchResults = (nodes, type) => {
+    if (!expandedGroups[type]) {
+      return [];
+    }
+
+    const search = searchTerms[type]?.trim() || '';
+
+    if (!search) {
+      // When no search, show first 5
+      return nodes.slice(0, MAX_VISIBLE_ENTITIES);
+    }
+
+    const searchLower = search.toLowerCase();
+
+    // Search through ALL nodes
+    const matches = nodes.filter((node) => {
+      const value = getValue(node).toLowerCase();
+      return value.includes(searchLower);
+    });
+
+    // Return ALL matches (up to 100)
+    return matches.slice(0, MAX_SEARCH_RESULTS);
+  };
+
+  const subdomainResults = getSearchResults(subdomainNodes, "Subdomain");
+  const ipResults = getSearchResults(ipNodes, "IPAddress");
+  const certificateResults = getSearchResults(certificateNodes, "Certificate");
 
   // ============================================================
   // CYTOSCAPE
@@ -189,16 +287,8 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       return;
     }
 
-    // ==========================================================
-    // ELEMENTS
-    // ==========================================================
-
     const elements = [];
     const addedNodeIds = new Set();
-
-    // ==========================================================
-    // ADD REAL NODE
-    // ==========================================================
 
     const addRealNode = (node) => {
       if (!node) {
@@ -236,62 +326,43 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       return cytoscapeId;
     };
 
-    // ==========================================================
-    // ADD GROUP NODE
-    // ==========================================================
-
     const addGroupNode = (
       id,
       groupType,
-      label,
       count
     ) => {
+      const label = getGroupLabel(groupType, count);
       elements.push({
         group: "nodes",
         data: {
           id,
           type: "Group",
           groupType,
-          label: `${label}\n${count} discovered`,
+          label: label,
           count,
         },
       });
     };
 
-    // ==========================================================
-    // DOMAIN
-    // ==========================================================
-
     addRealNode(domain);
-
-    // ==========================================================
-    // GROUPS
-    // ==========================================================
 
     addGroupNode(
       "__group_subdomains",
       "Subdomain",
-      "SUBDOMAINS",
       subdomainNodes.length
     );
 
     addGroupNode(
       "__group_ips",
       "IPAddress",
-      "IP ADDRESSES",
       ipNodes.length
     );
 
     addGroupNode(
       "__group_certificates",
       "Certificate",
-      "CERTIFICATES",
       certificateNodes.length
     );
-
-    // ==========================================================
-    // DOMAIN -> GROUP EDGES
-    // ==========================================================
 
     elements.push(
       {
@@ -323,10 +394,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       }
     );
 
-    // ==========================================================
-    // VISIBLE CONTENT
-    // ==========================================================
-
     const visibleSubdomains =
       expandedGroups.Subdomain
         ? getFilteredNodes(
@@ -350,10 +417,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "Certificate"
           )
         : [];
-
-    // ==========================================================
-    // GROUP -> ENTITY EDGE
-    // ==========================================================
 
     const addGroupEntityEdge = (
       groupId,
@@ -386,10 +449,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       });
     };
 
-    // ==========================================================
-    // SUBDOMAINS
-    // ==========================================================
-
     visibleSubdomains.forEach(
       (node, index) => {
         addRealNode(node);
@@ -402,10 +461,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         );
       }
     );
-
-    // ==========================================================
-    // IP ADDRESSES
-    // ==========================================================
 
     visibleIPs.forEach(
       (node, index) => {
@@ -420,10 +475,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       }
     );
 
-    // ==========================================================
-    // CERTIFICATES
-    // ==========================================================
-
     visibleCertificates.forEach(
       (node, index) => {
         addRealNode(node);
@@ -436,10 +487,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         );
       }
     );
-
-    // ==========================================================
-    // VISIBLE ORIGINAL IDS
-    // ==========================================================
 
     const visibleOriginalIds = new Set();
 
@@ -457,20 +504,10 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       visibleOriginalIds.add(getNodeId(node));
     });
 
-    // ==========================================================
-    // INFRASTRUCTURE
-    //
-    // IP -> ASN -> ORGANIZATION
-    // ==========================================================
-
     const connectedASNIds = new Set();
     const connectedOrganizationIds = new Set();
 
     if (expandedGroups.IPAddress) {
-      // --------------------------------------------------------
-      // FIND ASN CONNECTED TO VISIBLE IPS
-      // --------------------------------------------------------
-
       visibleIPs.forEach((ip) => {
         const ipId = getNodeId(ip);
 
@@ -497,10 +534,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         });
       });
 
-      // --------------------------------------------------------
-      // FIND ORGANIZATIONS
-      // --------------------------------------------------------
-
       allEdges.forEach((edge) => {
         const source = getEdgeSource(edge);
         const target = getEdgeTarget(edge);
@@ -526,7 +559,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
           );
         }
 
-        // Direct IP -> Organization
         if (
           visibleOriginalIds.has(source)
         ) {
@@ -562,10 +594,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         }
       });
 
-      // --------------------------------------------------------
-      // ADD ASN NODES
-      // --------------------------------------------------------
-
       const connectedASNs =
         asnNodes.filter((node) =>
           connectedASNIds.has(
@@ -580,10 +608,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
           getNodeId(node)
         );
       });
-
-      // --------------------------------------------------------
-      // ADD ORGANIZATION NODES
-      // --------------------------------------------------------
 
       const connectedOrganizations =
         organizationNodes.filter((node) =>
@@ -601,10 +625,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
           );
         }
       );
-
-      // --------------------------------------------------------
-      // ACTUAL INFRASTRUCTURE EDGES
-      // --------------------------------------------------------
 
       const addedRelationshipIds =
         new Set();
@@ -681,19 +701,11 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       );
     }
 
-    // ==========================================================
-    // CREATE CYTOSCAPE
-    // ==========================================================
-
     const cy = cytoscape({
       container,
       elements,
 
       style: [
-        // ------------------------------------------------------
-        // DEFAULT NODE
-        // ------------------------------------------------------
-
         {
           selector: "node",
           style: {
@@ -714,11 +726,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "overlay-opacity": 0,
           },
         },
-
-        // ------------------------------------------------------
-        // DOMAIN
-        // ------------------------------------------------------
-
         {
           selector: 'node[type="Domain"]',
           style: {
@@ -734,11 +741,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "text-max-width": 160,
           },
         },
-
-        // ------------------------------------------------------
-        // GROUP
-        // ------------------------------------------------------
-
         {
           selector: 'node[type="Group"]',
           style: {
@@ -746,9 +748,9 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "border-color": "#64748b",
             "border-width": 3,
             width: 190,
-            height: 105,
+            height: 115,
             shape: "round-rectangle",
-            "font-size": 12,
+            "font-size": 11,
             "font-weight": "bold",
             color: "#f8fafc",
             "text-max-width": 170,
@@ -757,11 +759,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "text-halign": "center",
           },
         },
-
-        // ------------------------------------------------------
-        // SUBDOMAIN
-        // ------------------------------------------------------
-
         {
           selector: 'node[type="Subdomain"]',
           style: {
@@ -776,11 +773,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             shape: "round-rectangle",
           },
         },
-
-        // ------------------------------------------------------
-        // IP
-        // ------------------------------------------------------
-
         {
           selector: 'node[type="IPAddress"]',
           style: {
@@ -795,11 +787,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             shape: "round-rectangle",
           },
         },
-
-        // ------------------------------------------------------
-        // ASN
-        // ------------------------------------------------------
-
         {
           selector: 'node[type="ASN"]',
           style: {
@@ -813,11 +800,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             shape: "round-rectangle",
           },
         },
-
-        // ------------------------------------------------------
-        // ORGANIZATION
-        // ------------------------------------------------------
-
         {
           selector:
             'node[type="Organization"]',
@@ -833,11 +815,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             shape: "round-rectangle",
           },
         },
-
-        // ------------------------------------------------------
-        // CERTIFICATE
-        // ------------------------------------------------------
-
         {
           selector:
             'node[type="Certificate"]',
@@ -853,11 +830,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             shape: "round-rectangle",
           },
         },
-
-        // ------------------------------------------------------
-        // EDGES
-        // ------------------------------------------------------
-
         {
           selector: "edge",
           style: {
@@ -878,11 +850,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             opacity: 0.9,
           },
         },
-
-        // ------------------------------------------------------
-        // RELATIONSHIP COLORS
-        // ------------------------------------------------------
-
         {
           selector:
             'edge[label="HAS_SUBDOMAIN"]',
@@ -893,7 +860,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             color: "#d8b4fe",
           },
         },
-
         {
           selector:
             'edge[label="RESOLVES_TO"]',
@@ -904,7 +870,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             color: "#fca5a5",
           },
         },
-
         {
           selector:
             'edge[label="BELONGS_TO_ASN"]',
@@ -915,7 +880,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             color: "#c7d2fe",
           },
         },
-
         {
           selector:
             'edge[label="ASSOCIATED_WITH"]',
@@ -926,7 +890,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             color: "#bef264",
           },
         },
-
         {
           selector:
             'edge[label="HAS_CERTIFICATE"]',
@@ -937,11 +900,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             color: "#5eead4",
           },
         },
-
-        // ------------------------------------------------------
-        // SELECTED
-        // ------------------------------------------------------
-
         {
           selector: "node:selected",
           style: {
@@ -950,7 +908,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             "overlay-opacity": 0,
           },
         },
-
         {
           selector: "edge:selected",
           style: {
@@ -974,10 +931,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
 
     cyRef.current = cy;
 
-    // ==========================================================
-    // POSITIONING
-    // ==========================================================
-
     const domainCyId = uniqueId(
       "node",
       domainId
@@ -988,7 +941,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       y: 0,
     });
 
-    // Groups
     cy.getElementById(
       "__group_subdomains"
     ).position({
@@ -1009,10 +961,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       x: 400,
       y: 220,
     });
-
-    // ==========================================================
-    // HORIZONTAL POSITIONING
-    // ==========================================================
 
     const positionHorizontal = (
       nodes,
@@ -1050,7 +998,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       });
     };
 
-    // Subdomains
     positionHorizontal(
       visibleSubdomains,
       -400,
@@ -1058,7 +1005,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       155
     );
 
-    // IPs
     positionHorizontal(
       visibleIPs,
       0,
@@ -1066,17 +1012,12 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       155
     );
 
-    // Certificates
     positionHorizontal(
       visibleCertificates,
       400,
       430,
       155
     );
-
-    // ==========================================================
-    // ASN / ORGANIZATION POSITIONING
-    // ==========================================================
 
     if (expandedGroups.IPAddress) {
       const connectedASNs =
@@ -1109,10 +1050,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       );
     }
 
-    // ==========================================================
-    // HIDE EMPTY GROUPS
-    // ==========================================================
-
     if (subdomainNodes.length === 0) {
       cy.getElementById(
         "__group_subdomains"
@@ -1143,10 +1080,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       ).style("display", "none");
     }
 
-    // ==========================================================
-    // FIT
-    // ==========================================================
-
     const fitGraph = () => {
       if (!cyRef.current) {
         return;
@@ -1172,10 +1105,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       });
     });
 
-    // ==========================================================
-    // GROUP CLICK
-    // ==========================================================
-
     cy.on(
       "tap",
       'node[type="Group"]',
@@ -1196,14 +1125,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       }
     );
 
-    // ==========================================================
-    // REAL NODE CLICK
-    //
-    // IMPORTANT:
-    // Domain is intentionally ignored.
-    // We do NOT show Node Details for Domain.
-    // ==========================================================
-
     cy.on(
       "tap",
       'node[type!="Group"]',
@@ -1213,10 +1134,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
 
         const type =
           String(node.data("type"));
-
-        // ------------------------------------------------------
-        // DO NOTHING FOR DOMAIN
-        // ------------------------------------------------------
 
         if (type === "Domain") {
           node.unselect();
@@ -1231,10 +1148,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
 
           return;
         }
-
-        // ------------------------------------------------------
-        // OTHER REAL NODES
-        // ------------------------------------------------------
 
         const originalId =
           String(
@@ -1282,6 +1195,8 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
             })
             .filter(Boolean);
 
+        const nodeProvenance = getProvenanceForNode(originalId);
+
         const selection = {
           ...originalNode.data,
           id: originalId,
@@ -1291,6 +1206,7 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
           original: originalNode,
           connectedNodes,
           connectedEdges,
+          provenance: nodeProvenance,
         };
 
         setSelectedNode(selection);
@@ -1303,10 +1219,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         }
       }
     );
-
-    // ==========================================================
-    // HOVER
-    // ==========================================================
 
     cy.on(
       "mouseover",
@@ -1345,20 +1257,12 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       }
     );
 
-    // ==========================================================
-    // RESIZE
-    // ==========================================================
-
     const resizeObserver =
       new ResizeObserver(() => {
         fitGraph();
       });
 
     resizeObserver.observe(container);
-
-    // ==========================================================
-    // CLEANUP
-    // ==========================================================
 
     return () => {
       resizeObserver.disconnect();
@@ -1414,11 +1318,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
 
   // ============================================================
   // LIST ITEM CLICK
-  //
-  // Clicking a result:
-  // 1. puts the value in search
-  // 2. keeps the group expanded
-  // 3. Cytoscape re-renders that matching node
   // ============================================================
 
   const handleEntityClick = (
@@ -1441,7 +1340,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       })
     );
 
-    // Close any currently open details.
     setSelectedNode(null);
 
     if (
@@ -1451,60 +1349,6 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
       onNodeSelect(null);
     }
   };
-
-  // ============================================================
-  // SEARCH RESULTS
-  // ============================================================
-
-  const getSearchResults = (
-    nodes,
-    type
-  ) => {
-    if (!expandedGroups[type]) {
-      return [];
-    }
-
-    const search =
-      searchTerms[type]
-        .trim()
-        .toLowerCase();
-
-    if (!search) {
-      return nodes.slice(
-        0,
-        MAX_VISIBLE_ENTITIES
-      );
-    }
-
-    return nodes
-      .filter((node) =>
-        getValue(node)
-          .toLowerCase()
-          .includes(search)
-      )
-      .slice(
-        0,
-        MAX_VISIBLE_ENTITIES
-      );
-  };
-
-  const subdomainResults =
-    getSearchResults(
-      subdomainNodes,
-      "Subdomain"
-    );
-
-  const ipResults =
-    getSearchResults(
-      ipNodes,
-      "IPAddress"
-    );
-
-  const certificateResults =
-    getSearchResults(
-      certificateNodes,
-      "Certificate"
-    );
 
   // ============================================================
   // RENDER
@@ -1517,10 +1361,7 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
         position: "relative",
       }}
     >
-      {/* ======================================================
-          GRAPH
-      ====================================================== */}
-
+      {/* Graph Container */}
       <div
         ref={containerRef}
         className="cytoscape-container hierarchical-graph-container"
@@ -1531,36 +1372,34 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
           position: "relative",
           borderRadius: "12px",
           overflow: "hidden",
-          border:
-            "1px solid rgba(148,163,184,0.15)",
+          border: "1px solid rgba(148,163,184,0.15)",
+          background: `
+            radial-gradient(circle at 20% 50%, rgba(99, 102, 241, 0.05) 0%, transparent 50%),
+            radial-gradient(circle at 80% 50%, rgba(168, 85, 247, 0.05) 0%, transparent 50%),
+            linear-gradient(rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(148, 163, 184, 0.03) 1px, transparent 1px),
+            #0a0f1a
+          `,
+          backgroundSize: `100% 100%, 100% 100%, 30px 30px, 30px 30px`,
         }}
       />
 
-      {/* ======================================================
-          LISTS / SEARCH
-      ====================================================== */}
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns:
-            "repeat(3, minmax(0, 1fr))",
-          gap: "12px",
-          marginTop: "14px",
-        }}
-      >
-        {/* ====================================================
-            SUBDOMAINS
-        ==================================================== */}
-
-        {expandedGroups.Subdomain &&
-          subdomainNodes.length > 0 && (
+      {/* Search & Lists */}
+      {(subdomainNodes.length > 0 || ipNodes.length > 0 || certificateNodes.length > 0) && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gap: "12px",
+            marginTop: "14px",
+          }}
+        >
+          {/* Subdomains */}
+          {expandedGroups.Subdomain && subdomainNodes.length > 0 && (
             <div
               style={{
-                background:
-                  "rgba(15,23,42,0.96)",
-                border:
-                  "1px solid rgba(168,85,247,0.35)",
+                background: "rgba(15,23,42,0.96)",
+                border: "1px solid rgba(168,85,247,0.35)",
                 borderRadius: "10px",
                 padding: "12px",
               }}
@@ -1570,19 +1409,16 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                   fontWeight: "700",
                   color: "#e9d5ff",
                   marginBottom: "8px",
+                  fontSize: "13px",
                 }}
               >
-                Subdomains (
-                {subdomainNodes.length}
-                )
+                Subdomains ({subdomainNodes.length})
               </div>
 
               <input
                 type="text"
                 placeholder="Search subdomains..."
-                value={
-                  searchTerms.Subdomain
-                }
+                value={searchTerms.Subdomain}
                 onChange={(event) =>
                   handleSearch(
                     "Subdomain",
@@ -1592,102 +1428,116 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                 style={{
                   width: "100%",
                   boxSizing: "border-box",
-                  padding: "8px 10px",
-                  borderRadius: "7px",
-                  border:
-                    "1px solid #475569",
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid #475569",
                   background: "#0f172a",
                   color: "#e2e8f0",
                   outline: "none",
                   marginBottom: "8px",
+                  fontSize: "12px",
                 }}
               />
 
               <div
                 style={{
-                  maxHeight: "180px",
+                  maxHeight: "150px",
                   overflowY: "auto",
                 }}
               >
-                {subdomainResults.map(
-                  (node) => (
-                    <button
-                      type="button"
-                      key={getNodeId(node)}
-                      onClick={() =>
-                        handleEntityClick(
-                          "Subdomain",
-                          node
-                        )
-                      }
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        padding:
-                          "7px 8px",
-                        marginBottom: "4px",
-                        borderRadius: "6px",
-                        border: "none",
-                        cursor: "pointer",
-                        background:
-                          "rgba(147,51,234,0.12)",
-                        color: "#e9d5ff",
-                        fontSize: "11px",
-                        wordBreak:
-                          "break-word",
-                      }}
-                    >
-                      {getValue(node)}
-                    </button>
-                  )
-                )}
+                {subdomainResults.map((node) => (
+                  <button
+                    type="button"
+                    key={getNodeId(node)}
+                    onClick={() =>
+                      handleEntityClick(
+                        "Subdomain",
+                        node
+                      )
+                    }
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "5px 8px",
+                      marginBottom: "3px",
+                      borderRadius: "4px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: "rgba(147,51,234,0.12)",
+                      color: "#e9d5ff",
+                      fontSize: "11px",
+                      wordBreak: "break-word",
+                      transition: "background 0.2s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(147,51,234,0.25)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "rgba(147,51,234,0.12)";
+                    }}
+                  >
+                    {getValue(node)}
+                  </button>
+                ))}
 
-                {subdomainResults.length ===
-                  0 && (
+                {subdomainResults.length === 0 && searchTerms.Subdomain.trim() && (
                   <div
                     style={{
                       color: "#94a3b8",
                       fontSize: "11px",
+                      padding: "8px 0",
                     }}
                   >
-                    No matching
-                    subdomains.
+                    No matching subdomains found.
+                  </div>
+                )}
+
+                {subdomainResults.length === 0 && !searchTerms.Subdomain.trim() && (
+                  <div
+                    style={{
+                      color: "#94a3b8",
+                      fontSize: "11px",
+                      padding: "8px 0",
+                    }}
+                  >
+                    Click the SUBDOMAINS group to show results.
                   </div>
                 )}
               </div>
 
-              {subdomainNodes.length >
-                MAX_VISIBLE_ENTITIES && (
+              {subdomainNodes.length > MAX_VISIBLE_ENTITIES && !searchTerms.Subdomain.trim() && (
                 <div
                   style={{
-                    marginTop: "8px",
+                    marginTop: "6px",
                     color: "#94a3b8",
                     fontSize: "10px",
                   }}
                 >
-                  Showing first{" "}
-                  {MAX_VISIBLE_ENTITIES}{" "}
-                  results. Use search
-                  to find a specific
-                  subdomain.
+                  Showing first {Math.min(subdomainNodes.length, MAX_VISIBLE_ENTITIES)} of {subdomainNodes.length}. Search to find more.
+                </div>
+              )}
+
+              {searchTerms.Subdomain.trim() && subdomainResults.length > 0 && (
+                <div
+                  style={{
+                    marginTop: "6px",
+                    color: "#60a5fa",
+                    fontSize: "10px",
+                  }}
+                >
+                  Found {subdomainResults.length} matching subdomain{subdomainResults.length > 1 ? 's' : ''}
                 </div>
               )}
             </div>
           )}
 
-        {/* ====================================================
-            IP ADDRESSES
-        ==================================================== */}
-
-        {expandedGroups.IPAddress &&
-          ipNodes.length > 0 && (
+          {/* IP Addresses */}
+          {expandedGroups.IPAddress && ipNodes.length > 0 && (
             <div
               style={{
-                background:
-                  "rgba(15,23,42,0.96)",
-                border:
-                  "1px solid rgba(239,68,68,0.35)",
+                background: "rgba(15,23,42,0.96)",
+                border: "1px solid rgba(239,68,68,0.35)",
                 borderRadius: "10px",
                 padding: "12px",
               }}
@@ -1697,19 +1547,16 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                   fontWeight: "700",
                   color: "#fecaca",
                   marginBottom: "8px",
+                  fontSize: "13px",
                 }}
               >
-                IP Addresses (
-                {ipNodes.length}
-                )
+                IP Addresses ({ipNodes.length})
               </div>
 
               <input
                 type="text"
                 placeholder="Search IP addresses..."
-                value={
-                  searchTerms.IPAddress
-                }
+                value={searchTerms.IPAddress}
                 onChange={(event) =>
                   handleSearch(
                     "IPAddress",
@@ -1719,20 +1566,20 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                 style={{
                   width: "100%",
                   boxSizing: "border-box",
-                  padding: "8px 10px",
-                  borderRadius: "7px",
-                  border:
-                    "1px solid #475569",
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid #475569",
                   background: "#0f172a",
                   color: "#e2e8f0",
                   outline: "none",
                   marginBottom: "8px",
+                  fontSize: "12px",
                 }}
               />
 
               <div
                 style={{
-                  maxHeight: "180px",
+                  maxHeight: "150px",
                   overflowY: "auto",
                 }}
               >
@@ -1750,51 +1597,49 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                       display: "block",
                       width: "100%",
                       textAlign: "left",
-                      padding: "7px 8px",
-                      marginBottom: "4px",
-                      borderRadius: "6px",
+                      padding: "5px 8px",
+                      marginBottom: "3px",
+                      borderRadius: "4px",
                       border: "none",
                       cursor: "pointer",
-                      background:
-                        "rgba(220,38,38,0.12)",
+                      background: "rgba(220,38,38,0.12)",
                       color: "#fecaca",
                       fontSize: "11px",
-                      wordBreak:
-                        "break-word",
+                      wordBreak: "break-word",
+                      transition: "background 0.2s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(220,38,38,0.25)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "rgba(220,38,38,0.12)";
                     }}
                   >
                     {getValue(node)}
                   </button>
                 ))}
 
-                {ipResults.length ===
-                  0 && (
+                {ipResults.length === 0 && searchTerms.IPAddress.trim() && (
                   <div
                     style={{
                       color: "#94a3b8",
                       fontSize: "11px",
+                      padding: "8px 0",
                     }}
                   >
-                    No matching IP
-                    addresses.
+                    No matching IP addresses found.
                   </div>
                 )}
               </div>
             </div>
           )}
 
-        {/* ====================================================
-            CERTIFICATES
-        ==================================================== */}
-
-        {expandedGroups.Certificate &&
-          certificateNodes.length > 0 && (
+          {/* Certificates */}
+          {expandedGroups.Certificate && certificateNodes.length > 0 && (
             <div
               style={{
-                background:
-                  "rgba(15,23,42,0.96)",
-                border:
-                  "1px solid rgba(20,184,166,0.35)",
+                background: "rgba(15,23,42,0.96)",
+                border: "1px solid rgba(20,184,166,0.35)",
                 borderRadius: "10px",
                 padding: "12px",
               }}
@@ -1804,19 +1649,16 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                   fontWeight: "700",
                   color: "#99f6e4",
                   marginBottom: "8px",
+                  fontSize: "13px",
                 }}
               >
-                Certificates (
-                {certificateNodes.length}
-                )
+                Certificates ({certificateNodes.length})
               </div>
 
               <input
                 type="text"
                 placeholder="Search certificates..."
-                value={
-                  searchTerms.Certificate
-                }
+                value={searchTerms.Certificate}
                 onChange={(event) =>
                   handleSearch(
                     "Certificate",
@@ -1826,364 +1668,384 @@ function HierarchicalGraph({ graph, onNodeSelect }) {
                 style={{
                   width: "100%",
                   boxSizing: "border-box",
-                  padding: "8px 10px",
-                  borderRadius: "7px",
-                  border:
-                    "1px solid #475569",
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid #475569",
                   background: "#0f172a",
                   color: "#e2e8f0",
                   outline: "none",
                   marginBottom: "8px",
+                  fontSize: "12px",
                 }}
               />
 
               <div
                 style={{
-                  maxHeight: "180px",
+                  maxHeight: "150px",
                   overflowY: "auto",
                 }}
               >
-                {certificateResults.map(
-                  (node) => (
-                    <button
-                      type="button"
-                      key={getNodeId(node)}
-                      onClick={() =>
-                        handleEntityClick(
-                          "Certificate",
-                          node
-                        )
-                      }
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        padding:
-                          "7px 8px",
-                        marginBottom: "4px",
-                        borderRadius: "6px",
-                        border: "none",
-                        cursor: "pointer",
-                        background:
-                          "rgba(15,118,110,0.12)",
-                        color: "#99f6e4",
-                        fontSize: "11px",
-                        wordBreak:
-                          "break-word",
-                      }}
-                    >
-                      {getValue(node)}
-                    </button>
-                  )
-                )}
+                {certificateResults.map((node) => (
+                  <button
+                    type="button"
+                    key={getNodeId(node)}
+                    onClick={() =>
+                      handleEntityClick(
+                        "Certificate",
+                        node
+                      )
+                    }
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "5px 8px",
+                      marginBottom: "3px",
+                      borderRadius: "4px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: "rgba(15,118,110,0.12)",
+                      color: "#99f6e4",
+                      fontSize: "11px",
+                      wordBreak: "break-word",
+                      transition: "background 0.2s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(15,118,110,0.25)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "rgba(15,118,110,0.12)";
+                    }}
+                  >
+                    {getValue(node)}
+                  </button>
+                ))}
 
-                {certificateResults.length ===
-                  0 && (
+                {certificateResults.length === 0 && searchTerms.Certificate.trim() && (
                   <div
                     style={{
                       color: "#94a3b8",
                       fontSize: "11px",
+                      padding: "8px 0",
                     }}
                   >
-                    No matching
-                    certificates.
+                    No matching certificates found.
                   </div>
                 )}
               </div>
             </div>
           )}
-      </div>
+        </div>
+      )}
 
-      {/* ======================================================
-          NODE DETAILS
-          Domain intentionally never opens this panel.
-      ====================================================== */}
-
+      {/* Node Details Panel */}
       {selectedNode && (
         <div
           style={{
-            marginTop: "14px",
+            marginTop: "16px",
             width: "100%",
             boxSizing: "border-box",
-            padding: "18px",
+            padding: "20px",
             borderRadius: "12px",
-            background:
-              "rgba(15,23,42,0.98)",
-            border:
-              "1px solid rgba(148,163,184,0.25)",
+            background: "rgba(15,23,42,0.98)",
+            border: "1px solid rgba(148,163,184,0.2)",
             color: "#e2e8f0",
-            boxShadow:
-              "0 10px 30px rgba(0,0,0,0.25)",
+            boxShadow: "0 10px 40px rgba(0,0,0,0.3)",
+            maxHeight: "500px",
+            overflowY: "auto",
           }}
         >
+          {/* Header */}
           <div
             style={{
               display: "flex",
-              justifyContent:
-                "space-between",
+              justifyContent: "space-between",
               alignItems: "center",
-              marginBottom: "15px",
+              marginBottom: "16px",
+              borderBottom: "1px solid rgba(148,163,184,0.1)",
+              paddingBottom: "12px",
             }}
           >
-            <strong
-              style={{
-                fontSize: "16px",
-              }}
-            >
-              Node Details
-            </strong>
+            <div>
+              <span
+                style={{
+                  fontSize: "11px",
+                  color: "#94a3b8",
+                  textTransform: "uppercase",
+                  fontWeight: "600",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                Node Details
+              </span>
+              <div
+                style={{
+                  fontSize: "18px",
+                  fontWeight: "700",
+                  color: "#f8fafc",
+                  marginTop: "2px",
+                }}
+              >
+                {selectedNode.value}
+              </div>
+            </div>
 
             <button
               type="button"
               onClick={closeSelection}
               style={{
-                background: "transparent",
+                background: "rgba(148,163,184,0.1)",
                 border: "none",
                 color: "#94a3b8",
                 cursor: "pointer",
-                fontSize: "22px",
+                fontSize: "20px",
+                width: "32px",
+                height: "32px",
+                borderRadius: "6px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "background 0.2s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "rgba(148,163,184,0.2)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "rgba(148,163,184,0.1)";
               }}
             >
               ×
             </button>
           </div>
 
-          {/* TYPE */}
-
+          {/* Type Badge */}
           <div
             style={{
-              display: "grid",
-              gridTemplateColumns:
-                "120px 1fr",
-              gap: "8px",
-              marginBottom: "8px",
+              display: "inline-block",
+              padding: "4px 12px",
+              borderRadius: "20px",
+              fontSize: "11px",
+              fontWeight: "600",
+              marginBottom: "16px",
+              background: (() => {
+                const type = selectedNode.type;
+                if (type === "IPAddress") return "rgba(220,38,38,0.2)";
+                if (type === "Subdomain") return "rgba(147,51,234,0.2)";
+                if (type === "ASN") return "rgba(79,70,229,0.2)";
+                if (type === "Organization") return "rgba(101,163,13,0.2)";
+                if (type === "Certificate") return "rgba(15,118,110,0.2)";
+                return "rgba(148,163,184,0.2)";
+              })(),
+              color: (() => {
+                const type = selectedNode.type;
+                if (type === "IPAddress") return "#fecaca";
+                if (type === "Subdomain") return "#e9d5ff";
+                if (type === "ASN") return "#c7d2fe";
+                if (type === "Organization") return "#d9f99d";
+                if (type === "Certificate") return "#99f6e4";
+                return "#e2e8f0";
+              })(),
             }}
           >
-            <span
-              style={{
-                color: "#94a3b8",
-                fontSize: "12px",
-              }}
-            >
-              TYPE
-            </span>
-
-            <strong>
-              {selectedNode.type}
-            </strong>
+            {selectedNode.type}
           </div>
 
-          {/* VALUE */}
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns:
-                "120px 1fr",
-              gap: "8px",
-              marginBottom: "15px",
-            }}
-          >
-            <span
-              style={{
-                color: "#94a3b8",
-                fontSize: "12px",
-              }}
-            >
-              VALUE
-            </span>
-
-            <strong
-              style={{
-                wordBreak: "break-word",
-              }}
-            >
-              {selectedNode.value}
-            </strong>
-          </div>
-
-          {/* RELATIONSHIPS */}
-
-          {Array.isArray(
-            selectedNode.connectedEdges
-          ) &&
-            selectedNode.connectedEdges
-              .length > 0 && (
-              <div>
-                <div
-                  style={{
-                    color: "#94a3b8",
-                    fontSize: "11px",
-                    fontWeight: "700",
-                    marginBottom: "8px",
-                    textTransform:
-                      "uppercase",
-                  }}
-                >
-                  Relationships
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gap: "7px",
-                  }}
-                >
-                  {selectedNode.connectedEdges.map(
-                    (
-                      edge,
-                      index
-                    ) => {
-                      const source =
-                        getEdgeSource(
-                          edge
-                        );
-
-                      const target =
-                        getEdgeTarget(
-                          edge
-                        );
-
-                      const relationship =
-                        getRelationship(
-                          edge
-                        );
-
-                      const sourceNode =
-                        findNodeById(
-                          source
-                        );
-
-                      const targetNode =
-                        findNodeById(
-                          target
-                        );
-
-                      return (
-                        <div
-                          key={
-                            edge?.data
-                              ?.id ??
-                            index
-                          }
-                          style={{
-                            padding:
-                              "10px 12px",
-                            borderRadius:
-                              "8px",
-                            background:
-                              "rgba(30,41,59,0.8)",
-                            border:
-                              "1px solid rgba(71,85,105,0.4)",
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontWeight:
-                                "700",
-                              fontSize:
-                                "11px",
-                              marginBottom:
-                                "5px",
-                            }}
-                          >
-                            {
-                              relationship
-                            }
-                          </div>
-
-                          <div
-                            style={{
-                              display:
-                                "flex",
-                              alignItems:
-                                "center",
-                              gap: "8px",
-                              flexWrap:
-                                "wrap",
-                              fontSize:
-                                "11px",
-                              color:
-                                "#cbd5e1",
-                            }}
-                          >
-                            <span>
-                              {sourceNode
-                                ? getValue(
-                                    sourceNode
-                                  )
-                                : source}
-                            </span>
-
-                            <span
-                              style={{
-                                color:
-                                  "#60a5fa",
-                                fontWeight:
-                                  "700",
-                              }}
-                            >
-                              →
-                            </span>
-
-                            <span>
-                              {targetNode
-                                ? getValue(
-                                    targetNode
-                                  )
-                                : target}
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    }
-                  )}
-                </div>
+          {/* Provenance Section */}
+          {selectedNode.provenance && selectedNode.provenance.length > 0 && (
+            <div style={{ marginBottom: "20px" }}>
+              <div
+                style={{
+                  color: "#94a3b8",
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  marginBottom: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                📋 Provenance & Evidence
               </div>
-            )}
 
-          {/* NO RELATIONSHIPS */}
+              <div
+                style={{
+                  display: "grid",
+                  gap: "8px",
+                  maxHeight: "200px",
+                  overflowY: "auto",
+                }}
+              >
+                {selectedNode.provenance.map((record, index) => (
+                  <div
+                    key={index}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "8px",
+                      background: "rgba(30,41,59,0.6)",
+                      border: "1px solid rgba(71,85,105,0.3)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontWeight: "600",
+                          fontSize: "12px",
+                          color: "#60a5fa",
+                        }}
+                      >
+                        {record.source || "Unknown Source"}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: "10px",
+                          color: "#94a3b8",
+                        }}
+                      >
+                        {record.recorded_at ? new Date(record.recorded_at).toLocaleDateString() : "N/A"}
+                      </span>
+                    </div>
+                    
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: "#cbd5e1",
+                      }}
+                    >
+                      <strong>Method:</strong> {record.method || "N/A"}
+                    </div>
+                    
+                    {record.entity_value && record.entity_value !== selectedNode.value && (
+                      <div
+                        style={{
+                          fontSize: "11px",
+                          color: "#94a3b8",
+                          marginTop: "3px",
+                        }}
+                      >
+                        <strong>Entity:</strong> {record.entity_value}
+                      </div>
+                    )}
+                    
+                    {record.details && (
+                      <div
+                        style={{
+                          fontSize: "10px",
+                          color: "#64748b",
+                          marginTop: "4px",
+                          wordBreak: "break-word",
+                          fontStyle: "italic",
+                        }}
+                      >
+                        {typeof record.details === 'string' ? record.details : JSON.stringify(record.details)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
-          {(!Array.isArray(
-            selectedNode.connectedEdges
-          ) ||
-            selectedNode.connectedEdges
-              .length === 0) && (
+          {/* Relationships */}
+          {Array.isArray(selectedNode.connectedEdges) && selectedNode.connectedEdges.length > 0 && (
+            <div>
+              <div
+                style={{
+                  color: "#94a3b8",
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  marginBottom: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                Relationships
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gap: "6px",
+                }}
+              >
+                {selectedNode.connectedEdges.map((edge, index) => {
+                  const source = getEdgeSource(edge);
+                  const target = getEdgeTarget(edge);
+                  const relationship = getRelationship(edge);
+                  const sourceNode = findNodeById(source);
+                  const targetNode = findNodeById(target);
+
+                  return (
+                    <div
+                      key={edge?.data?.id ?? index}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: "6px",
+                        background: "rgba(30,41,59,0.6)",
+                        border: "1px solid rgba(71,85,105,0.2)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        flexWrap: "wrap",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontWeight: "600",
+                          fontSize: "10px",
+                          color: "#60a5fa",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.3px",
+                        }}
+                      >
+                        {relationship}
+                      </span>
+                      <span style={{ color: "#94a3b8" }}>·</span>
+                      <span style={{ color: "#cbd5e1" }}>
+                        {sourceNode ? getValue(sourceNode) : source}
+                      </span>
+                      <span style={{ color: "#60a5fa", fontWeight: "700" }}>→</span>
+                      <span style={{ color: "#cbd5e1" }}>
+                        {targetNode ? getValue(targetNode) : target}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {(!Array.isArray(selectedNode.connectedEdges) || selectedNode.connectedEdges.length === 0) && (
             <div
               style={{
                 color: "#94a3b8",
                 fontSize: "12px",
+                padding: "8px 0",
               }}
             >
-              No relationships
-              available for this
-              node.
+              No relationships available for this node.
             </div>
           )}
         </div>
       )}
 
-      {/* ======================================================
-          INSTRUCTIONS
-      ====================================================== */}
-
+      {/* Instructions */}
       <div
         style={{
           marginTop: "12px",
           textAlign: "center",
-          fontSize: "12px",
-          color: "#94a3b8",
+          fontSize: "11px",
+          color: "#64748b",
+          padding: "8px",
         }}
       >
-        Click a category to
-        expand it. Search large
-        result sets instead of
-        rendering thousands of
-        nodes. Click a list item
-        to search and display it
-        in the graph. Click an
-        entity node to inspect
-        its relationships.
+        Click a category to expand it. Click an entity to inspect relationships and provenance.
       </div>
     </div>
   );

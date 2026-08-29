@@ -35,17 +35,7 @@ def cancel_active_processes():
 
 def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
     """
-    Collect OSINT data for a domain.
-
-    Parameters
-    ----------
-    domain : str
-        Target domain.
-    progress_callback : callable, optional
-        Function to call with progress updates.
-        Receives dict with step, label, message, status, progress.
-    is_cancelled : callable, optional
-        Function that returns True if the scan should be cancelled.
+    Collect OSINT data for a domain with real-time progress tracking.
     """
 
     def update_progress(step, label, message, status, progress):
@@ -59,7 +49,8 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
                 "progress": progress,
             })
         
-        print(f"[{progress:3d}%] [{status:9s}] {label}: {message}")
+        # Fix: Convert progress to int for display with %d format
+        print(f"[{int(progress):3d}%] [{status:9s}] {label}: {message}")
 
     def check_cancelled():
         """Check if the scan has been cancelled."""
@@ -103,6 +94,38 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "virustotal": {}
     }
 
+    # Track progress for each major step
+    step_progress = {
+        "dns": 0,
+        "ip_metadata": 0,
+        "subfinder": 0,
+        "amass": 0,
+        "certificates": 0,
+        "virustotal": 0
+    }
+    
+    def calculate_overall_progress():
+        """Calculate overall progress based on completed steps."""
+        weights = {
+            "dns": 15,        # 0-15%
+            "ip_metadata": 10, # 15-25%
+            "subfinder": 20,   # 25-45%
+            "amass": 20,       # 45-65%
+            "certificates": 10, # 65-75%
+            "virustotal": 15   # 75-90%
+        }
+        
+        total = 0
+        for step, value in step_progress.items():
+            weight = weights.get(step, 10)
+            if value >= 100:
+                total += weight
+            else:
+                total += (value / 100) * weight
+        
+        # Cap at 90% (remaining 10% for normalization and final steps)
+        return min(90, total)
+
     # =========================================================
     # 3. DNS COLLECTION
     # =========================================================
@@ -114,21 +137,23 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "DNS Resolution",
         "Querying DNS records...",
         "running",
-        20
+        5
     )
 
     results["dns_records"] = get_dns_records(domain)
+    step_progress["dns"] = 100
 
     # Check if cancelled after DNS
     if check_cancelled():
         return {"success": False, "message": "Scan cancelled"}
 
+    overall = calculate_overall_progress()
     update_progress(
         "dns",
         "DNS Resolution",
         "DNS records resolved",
         "completed",
-        30
+        overall
     )
 
     # =========================================================
@@ -160,23 +185,25 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "IP Metadata",
         "Looking up ASN and organization...",
         "running",
-        32
+        calculate_overall_progress()
     )
 
     results["ip_metadata"] = get_all_ip_metadata(
         results["ips"]
     )
+    step_progress["ip_metadata"] = 100
 
     # Check if cancelled after IP metadata
     if check_cancelled():
         return {"success": False, "message": "Scan cancelled"}
 
+    overall = calculate_overall_progress()
     update_progress(
         "ip_metadata",
         "IP Metadata",
         "IP metadata collected",
         "completed",
-        35
+        overall
     )
 
     # =========================================================
@@ -200,10 +227,11 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "Subdomain Discovery",
         "Running Subfinder...",
         "running",
-        38
+        calculate_overall_progress()
     )
 
     subfinder_subdomains = get_subdomains(domain, is_cancelled=is_cancelled)
+    step_progress["subfinder"] = 100
 
     # Check if cancelled after Subfinder
     if check_cancelled():
@@ -214,12 +242,13 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         f"{len(subfinder_subdomains)}"
     )
 
+    overall = calculate_overall_progress()
     update_progress(
         "subfinder",
         "Subdomain Discovery",
         f"Subfinder found {len(subfinder_subdomains)} subdomains",
         "completed",
-        45
+        overall
     )
 
     # ---------------------------------------------------------
@@ -237,10 +266,11 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "Subdomain Discovery",
         "Running AMASS...",
         "running",
-        48
+        calculate_overall_progress()
     )
 
     amass_subdomains = get_amass_subdomains(domain, is_cancelled=is_cancelled)
+    step_progress["amass"] = 100
 
     # Check if cancelled after Amass
     if check_cancelled():
@@ -251,12 +281,13 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         f"{len(amass_subdomains)}"
     )
 
+    overall = calculate_overall_progress()
     update_progress(
         "amass",
         "Subdomain Discovery",
         f"AMASS found {len(amass_subdomains)} subdomains",
         "completed",
-        55
+        overall
     )
 
     # =========================================================
@@ -350,10 +381,11 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "Certificate Intelligence",
         "Querying Certificate Transparency...",
         "running",
-        60
+        calculate_overall_progress()
     )
 
     results["certificates"] = get_certificates(domain)
+    step_progress["certificates"] = 100
 
     # Check if cancelled after certificates
     if check_cancelled():
@@ -364,12 +396,13 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         f"{len(results['certificates'])}"
     )
 
+    overall = calculate_overall_progress()
     update_progress(
         "certificates",
         "Certificate Intelligence",
         f"Found {len(results['certificates'])} certificates",
         "completed",
-        65
+        overall
     )
 
     # =========================================================
@@ -383,13 +416,14 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         "VirusTotal Intelligence",
         "Querying VirusTotal API for detailed analysis...",
         "running",
-        68
+        calculate_overall_progress()
     )
 
     try:
-        # Use enhanced collector (already using the new function)
+        # Use enhanced collector
         vt_data = collect_virustotal_domain(domain)
         results["virustotal"] = vt_data
+        step_progress["virustotal"] = 100
         
         # Check if cancelled after VirusTotal
         if check_cancelled():
@@ -412,23 +446,25 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
         else:
             print("[!] No VirusTotal data returned.")
         
+        overall = calculate_overall_progress()
         update_progress(
             "virustotal",
             "VirusTotal Intelligence",
             f"Risk Score: {vt_data.get('risk_score', 'N/A')}/100 | {vt_data.get('security_summary', {}).get('malicious', 0)} malicious vendors",
             "completed",
-            70
+            overall
         )
         
     except Exception as e:
         print(f"[!] VirusTotal collection error: {e}")
         results["virustotal"] = {"error": str(e)}
+        overall = calculate_overall_progress()
         update_progress(
             "virustotal",
             "VirusTotal Intelligence",
             f"Error: {str(e)[:50]}...",
             "failed",
-            70
+            overall
         )
 
     # =========================================================
@@ -438,6 +474,16 @@ def collect_domain_osint(domain, progress_callback=None, is_cancelled=None):
     # Final cancellation check before returning
     if check_cancelled():
         return {"success": False, "message": "Scan cancelled"}
+
+    # Update to 90% (remaining 10% handled by pipeline_service)
+    overall = calculate_overall_progress()
+    update_progress(
+        "collection_summary",
+        "OSINT Collection",
+        f"Collection complete: {len(results['subdomains'])} subdomains",
+        "completed",
+        overall
+    )
 
     return results
 
