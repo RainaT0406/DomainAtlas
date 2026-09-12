@@ -2,6 +2,8 @@ import asyncio
 import io
 import json
 import os
+import uuid
+
 from collections import deque
 from datetime import datetime
 from typing import Optional
@@ -35,9 +37,19 @@ from backend.services.pipeline_service import run_osint_pipeline
 
 load_dotenv()
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_URI = os.getenv(
+    "NEO4J_URI",
+    "bolt://localhost:7687",
+)
+
+NEO4J_USERNAME = os.getenv(
+    "NEO4J_USERNAME",
+    "neo4j",
+)
+
+NEO4J_PASSWORD = os.getenv(
+    "NEO4J_PASSWORD"
+)
 
 
 # ============================================================
@@ -47,25 +59,158 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 INITIAL_SUBDOMAIN_LIMIT = 5
 GRAPH_IP_LIMIT = 20
 
+# Keep only a small amount of global history.
+GLOBAL_PROGRESS_HISTORY_LIMIT = 100
+
+# Per-scan progress history.
+SCAN_PROGRESS_HISTORY_LIMIT = 100
+
 
 # ============================================================
-# PROGRESS TRACKING
+# PROGRESS / SCAN STATE
 # ============================================================
 
-progress_queue = deque(maxlen=100)
+# Global progress history.
+#
+# IMPORTANT:
+# Every update contains scan_id.
+# This prevents updates from different scans from being
+# indistinguishable.
+progress_queue = deque(
+    maxlen=GLOBAL_PROGRESS_HISTORY_LIMIT
+)
+
+# Connected subscribers for the global SSE endpoint.
 progress_subscribers = []
 
+# Connected subscribers by scan ID.
+scan_subscribers = {}
+
+# Currently running scans only.
 active_scans = {}
+
+# Cancellation flags.
 scan_cancelled = {}
+
+# Final/current progress state for every scan.
+#
+# Unlike active_scans, this dictionary is intentionally retained
+# after completion/cancellation/failure so the frontend can
+# retrieve the final state.
 progress_store = {}
 
+# Individual progress history per scan.
+scan_progress_history = {}
+
+
+# ============================================================
+# PROGRESS HELPERS
+# ============================================================
 
 def publish_progress(update: dict):
-    """Publish a progress update to all connected SSE subscribers."""
+    """
+    Publish a progress update.
+
+    Every update MUST contain scan_id.
+
+    The update is:
+        1. Stored globally.
+        2. Stored in the scan-specific history.
+        3. Sent to global subscribers.
+        4. Sent to subscribers of the specific scan.
+    """
+
+    scan_id = update.get("scan_id")
+
+    if not scan_id:
+        print(
+            "[!] Progress update ignored because scan_id is missing."
+        )
+        return
+
+    # --------------------------------------------------------
+    # GLOBAL HISTORY
+    # --------------------------------------------------------
+
     progress_queue.append(update)
 
-    for subscriber in progress_subscribers:
+    # --------------------------------------------------------
+    # SCAN-SPECIFIC HISTORY
+    # --------------------------------------------------------
+
+    if scan_id not in scan_progress_history:
+        scan_progress_history[scan_id] = deque(
+            maxlen=SCAN_PROGRESS_HISTORY_LIMIT
+        )
+
+    scan_progress_history[scan_id].append(update)
+
+    # --------------------------------------------------------
+    # GLOBAL SUBSCRIBERS
+    # --------------------------------------------------------
+
+    for subscriber in list(progress_subscribers):
         subscriber.append(update)
+
+    # --------------------------------------------------------
+    # SCAN-SPECIFIC SUBSCRIBERS
+    # --------------------------------------------------------
+
+    subscribers = scan_subscribers.get(
+        scan_id,
+        [],
+    )
+
+    for subscriber in list(subscribers):
+        subscriber.append(update)
+
+
+def set_scan_status(
+    scan_id: str,
+    status: str,
+    progress: Optional[int] = None,
+):
+    """
+    Safely update the current state of a scan.
+    """
+
+    if scan_id not in progress_store:
+        return
+
+    progress_data = progress_store[scan_id]
+
+    progress_data["status"] = status
+
+    if progress is not None:
+        progress_data["progress"] = progress
+
+    if scan_id in active_scans:
+        active_scans[scan_id]["status"] = status
+
+        if progress is not None:
+            active_scans[scan_id]["progress"] = progress
+
+
+def remove_active_scan(scan_id: str):
+    """
+    Remove a scan from the active scan registry.
+
+    The completed/final state remains in progress_store.
+    """
+
+    active_scans.pop(scan_id, None)
+    scan_cancelled.pop(scan_id, None)
+
+
+def is_scan_cancelled(scan_id: str) -> bool:
+    """
+    Return True if the scan has been cancelled.
+    """
+
+    return scan_cancelled.get(
+        scan_id,
+        False,
+    )
 
 
 # ============================================================
@@ -113,40 +258,74 @@ class StopRequest(BaseModel):
 # ============================================================
 
 def normalize_domain(domain: str) -> str:
-    """Normalize a domain or hostname."""
-    return domain.strip().lower().rstrip(".")
+    """
+    Normalize a domain or hostname.
+    """
+
+    return (
+        domain
+        .strip()
+        .lower()
+        .rstrip(".")
+    )
 
 
 def create_neo4j_driver(password: str):
-    """Create a Neo4j driver."""
+    """
+    Create a Neo4j driver.
+    """
+
     if not password:
-        raise RuntimeError("Neo4j password is not configured.")
+        raise RuntimeError(
+            "Neo4j password is not configured."
+        )
 
     return GraphDatabase.driver(
         NEO4J_URI,
-        auth=(NEO4J_USERNAME, password),
+        auth=(
+            NEO4J_USERNAME,
+            password,
+        ),
     )
 
 
 def node_to_cytoscape(record):
-    """Convert a Neo4j node record to Cytoscape format."""
+    """
+    Convert a Neo4j node record to Cytoscape format.
+    """
+
     labels = record["labels"] or []
     value = record["value"]
 
-    node_type = labels[0] if labels else "Entity"
+    node_type = (
+        labels[0]
+        if labels
+        else "Entity"
+    )
 
     return {
         "data": {
             "id": record["id"],
-            "label": str(value) if value is not None else node_type,
+            "label": (
+                str(value)
+                if value is not None
+                else node_type
+            ),
             "type": node_type,
         }
     }
 
 
-def extract_provenance(normalized_data: dict) -> list:
+# ============================================================
+# PROVENANCE
+# ============================================================
+
+def extract_provenance(
+    normalized_data: dict,
+) -> list:
     """
-    Extract provenance from both entities and relationships.
+    Extract provenance from both entities
+    and relationships.
     """
 
     provenance_records = []
@@ -155,18 +334,42 @@ def extract_provenance(normalized_data: dict) -> list:
     # ENTITY PROVENANCE
     # --------------------------------------------------------
 
-    for entity in normalized_data.get("entities", []):
-        entity_type = entity.get("type", "Entity")
-        entity_value = entity.get("value", "")
+    for entity in normalized_data.get(
+        "entities",
+        [],
+    ):
 
-        for provenance in entity.get("provenance", []):
+        entity_type = entity.get(
+            "type",
+            "Entity",
+        )
+
+        entity_value = entity.get(
+            "value",
+            "",
+        )
+
+        for provenance in entity.get(
+            "provenance",
+            [],
+        ):
+
             provenance_records.append(
                 {
                     "entity_type": entity_type,
                     "entity_value": entity_value,
-                    "source": provenance.get("source", "Unknown"),
-                    "method": provenance.get("method", "Unknown"),
-                    "recorded_at": provenance.get("recorded_at", ""),
+                    "source": provenance.get(
+                        "source",
+                        "Unknown",
+                    ),
+                    "method": provenance.get(
+                        "method",
+                        "Unknown",
+                    ),
+                    "recorded_at": provenance.get(
+                        "recorded_at",
+                        "",
+                    ),
                 }
             )
 
@@ -174,9 +377,20 @@ def extract_provenance(normalized_data: dict) -> list:
     # RELATIONSHIP PROVENANCE
     # --------------------------------------------------------
 
-    for relationship in normalized_data.get("relationships", []):
-        from_entity = relationship.get("from", {})
-        to_entity = relationship.get("to", {})
+    for relationship in normalized_data.get(
+        "relationships",
+        [],
+    ):
+
+        from_entity = relationship.get(
+            "from",
+            {},
+        )
+
+        to_entity = relationship.get(
+            "to",
+            {},
+        )
 
         relationship_type = relationship.get(
             "relationship",
@@ -189,14 +403,27 @@ def extract_provenance(normalized_data: dict) -> list:
             f"{to_entity.get('value', '')}"
         )
 
-        for provenance in relationship.get("provenance", []):
+        for provenance in relationship.get(
+            "provenance",
+            [],
+        ):
+
             provenance_records.append(
                 {
                     "entity_type": "Relationship",
                     "entity_value": relationship_value,
-                    "source": provenance.get("source", "Unknown"),
-                    "method": provenance.get("method", "Unknown"),
-                    "recorded_at": provenance.get("recorded_at", ""),
+                    "source": provenance.get(
+                        "source",
+                        "Unknown",
+                    ),
+                    "method": provenance.get(
+                        "method",
+                        "Unknown",
+                    ),
+                    "recorded_at": provenance.get(
+                        "recorded_at",
+                        "",
+                    ),
                 }
             )
 
@@ -214,22 +441,26 @@ def get_graph_data(
     """
     Extract the initial dashboard graph.
 
-    IMPORTANT:
-    Only the first 5 subdomains are included here.
+    Only the first five subdomains are included.
 
-    The complete subdomain inventory remains available through
-    get_all_subdomains().
+    The complete inventory remains available through
+    /subdomains.
 
-    A specific subdomain can later be loaded through:
-        /subdomains/graph
+    A specific subdomain can be loaded through
+    /subdomains/graph.
     """
 
     domain = normalize_domain(domain)
 
-    driver = create_neo4j_driver(password)
+    driver = create_neo4j_driver(
+        password
+    )
 
     try:
-        with driver.session(database="neo4j") as session:
+
+        with driver.session(
+            database="neo4j"
+        ) as session:
 
             # ------------------------------------------------
             # CORE GRAPH
@@ -237,7 +468,6 @@ def get_graph_data(
 
             query = """
             MATCH (d:Domain {value: $domain})
-
             OPTIONAL MATCH (d)-[:RESOLVES_TO]->(ip:IPAddress)
             OPTIONAL MATCH (ip)-[:BELONGS_TO_ASN]->(asn:ASN)
             OPTIONAL MATCH (ip)-[:ASSOCIATED_WITH]->(org:Organization)
@@ -276,16 +506,22 @@ def get_graph_data(
             node_ids = set()
 
             for record in result:
+
                 node_id = record["id"]
 
                 if node_id in node_ids:
                     continue
 
-                nodes.append(node_to_cytoscape(record))
+                nodes.append(
+                    node_to_cytoscape(
+                        record
+                    )
+                )
+
                 node_ids.add(node_id)
 
             # ------------------------------------------------
-            # INITIAL 5 SUBDOMAINS ONLY
+            # INITIAL SUBDOMAINS
             # ------------------------------------------------
 
             subdomain_query = """
@@ -298,6 +534,7 @@ def get_graph_data(
                 s.value AS value
 
             ORDER BY s.value
+
             LIMIT $limit
             """
 
@@ -308,6 +545,7 @@ def get_graph_data(
             )
 
             for record in subdomain_result:
+
                 node_id = record["id"]
 
                 if node_id in node_ids:
@@ -317,7 +555,9 @@ def get_graph_data(
                     {
                         "data": {
                             "id": node_id,
-                            "label": str(record["value"]),
+                            "label": str(
+                                record["value"]
+                            ),
                             "type": "Subdomain",
                         }
                     }
@@ -330,6 +570,7 @@ def get_graph_data(
             # ------------------------------------------------
 
             if not node_ids:
+
                 return {
                     "nodes": [],
                     "edges": [],
@@ -355,20 +596,25 @@ def get_graph_data(
 
             edges = []
 
-            for index, record in enumerate(relationship_result):
+            for index, record in enumerate(
+                relationship_result
+            ):
+
                 edges.append(
                     {
                         "data": {
                             "id": f"edge-{index}",
                             "source": record["source"],
                             "target": record["target"],
-                            "label": record["relationship"],
+                            "label": record[
+                                "relationship"
+                            ],
                         }
                     }
                 )
 
             print(
-                f"[+] Initial graph extracted: "
+                "[+] Initial graph extracted: "
                 f"{len(nodes)} nodes, "
                 f"{len(edges)} relationships."
             )
@@ -392,38 +638,39 @@ def get_subdomain_graph(
     password: str,
 ):
     """
-    Retrieve a specific subdomain and its related infrastructure.
+    Retrieve a specific subdomain and its related
+    infrastructure.
 
-    This is intentionally separate from get_graph_data().
-
-    The initial graph contains only 5 subdomains, but this function
-    allows ANY subdomain from the inventory to be loaded dynamically.
-
-    Returned graph may contain:
+    Returned graph:
 
         Domain
-          |
-          +-- Subdomain
-                 |
-                 +-- IP Address
-                        |
-                        +-- ASN
-                        |
-                        +-- Organization
+           |
+           +-- Subdomain
+                  |
+                  +-- IP Address
+                         |
+                         +-- ASN
+                         |
+                         +-- Organization
 
-    Provenance is also returned separately.
+    Provenance is returned separately.
     """
 
     domain = normalize_domain(domain)
     subdomain = normalize_domain(subdomain)
 
-    driver = create_neo4j_driver(password)
+    driver = create_neo4j_driver(
+        password
+    )
 
     try:
-        with driver.session(database="neo4j") as session:
+
+        with driver.session(
+            database="neo4j"
+        ) as session:
 
             # ------------------------------------------------
-            # FIND SPECIFIC SUBDOMAIN
+            # FIND SUBDOMAIN
             # ------------------------------------------------
 
             subdomain_query = """
@@ -465,15 +712,20 @@ def get_subdomain_graph(
             node_ids = set()
 
             def add_node(node):
+
                 if node is None:
                     return
 
-                node_id = str(node.element_id)
+                node_id = str(
+                    node.element_id
+                )
 
                 if node_id in node_ids:
                     return
 
-                labels = list(node.labels)
+                labels = list(
+                    node.labels
+                )
 
                 node_type = (
                     labels[0]
@@ -481,7 +733,9 @@ def get_subdomain_graph(
                     else "Entity"
                 )
 
-                value = node.get("value")
+                value = node.get(
+                    "value"
+                )
 
                 nodes.append(
                     {
@@ -500,6 +754,7 @@ def get_subdomain_graph(
                 node_ids.add(node_id)
 
             for record in records:
+
                 add_node(record["d"])
                 add_node(record["s"])
                 add_node(record["ip"])
@@ -513,7 +768,12 @@ def get_subdomain_graph(
             edges = []
             edge_ids = set()
 
-            def add_relationship(source, target, relationship):
+            def add_relationship(
+                source,
+                target,
+                relationship,
+            ):
+
                 if (
                     source is None
                     or target is None
@@ -534,14 +794,22 @@ def get_subdomain_graph(
                     {
                         "data": {
                             "id": edge_id,
-                            "source": str(source.element_id),
-                            "target": str(target.element_id),
+                            "source": str(
+                                source.element_id
+                            ),
+                            "target": str(
+                                target.element_id
+                            ),
                             "label": relationship.type,
                         }
                     }
                 )
 
                 edge_ids.add(edge_id)
+
+            # ------------------------------------------------
+            # RELATIONSHIPS
+            # ------------------------------------------------
 
             for record in records:
 
@@ -552,22 +820,29 @@ def get_subdomain_graph(
                 org_node = record["org"]
 
                 # Domain -> Subdomain
-                if domain_node and subdomain_node:
-                    add_relationship(
-                        domain_node,
-                        subdomain_node,
-                        session.run(
-                            """
-                            MATCH (d:Domain {value: $domain})
-                                  -[r:HAS_SUBDOMAIN]->
-                                  (s:Subdomain {value: $subdomain})
+                if (
+                    domain_node
+                    and subdomain_node
+                ):
 
-                            RETURN r
-                            """,
-                            domain=domain,
-                            subdomain=subdomain,
-                        ).single()["r"],
-                    )
+                    has_subdomain_result = session.run(
+                        """
+                        MATCH (d:Domain {value: $domain})
+                              -[r:HAS_SUBDOMAIN]->
+                              (s:Subdomain {value: $subdomain})
+                        RETURN r
+                        """,
+                        domain=domain,
+                        subdomain=subdomain,
+                    ).single()
+
+                    if has_subdomain_result:
+
+                        add_relationship(
+                            domain_node,
+                            subdomain_node,
+                            has_subdomain_result["r"],
+                        )
 
                 # Subdomain -> IP
                 add_relationship(
@@ -593,26 +868,16 @@ def get_subdomain_graph(
             # ------------------------------------------------
             # PROVENANCE
             # ------------------------------------------------
-            #
-            # Provenance is retrieved from the Neo4j nodes and
-            # relationships when those properties exist.
-            #
-            # This supports both:
-            #   provenance: [...]
-            # and
-            #   source / method / recorded_at
-            # properties.
 
             provenance = []
 
-            relevant_nodes = [
-                record["d"]
-                for record in records
-            ]
+            relevant_nodes = []
 
             for record in records:
+
                 relevant_nodes.extend(
                     [
+                        record["d"],
                         record["s"],
                         record["ip"],
                         record["asn"],
@@ -627,14 +892,18 @@ def get_subdomain_graph(
                 if node is None:
                     continue
 
-                node_id = str(node.element_id)
+                node_id = str(
+                    node.element_id
+                )
 
                 if node_id in seen_nodes:
                     continue
 
                 seen_nodes.add(node_id)
 
-                labels = list(node.labels)
+                labels = list(
+                    node.labels
+                )
 
                 node_type = (
                     labels[0]
@@ -642,7 +911,10 @@ def get_subdomain_graph(
                     else "Entity"
                 )
 
-                value = node.get("value", "")
+                value = node.get(
+                    "value",
+                    "",
+                )
 
                 # --------------------------------------------
                 # LIST-BASED PROVENANCE
@@ -653,17 +925,25 @@ def get_subdomain_graph(
                     [],
                 )
 
-                if isinstance(node_provenance, list):
+                if isinstance(
+                    node_provenance,
+                    list,
+                ):
 
                     for item in node_provenance:
 
-                        if not isinstance(item, dict):
+                        if not isinstance(
+                            item,
+                            dict,
+                        ):
                             continue
 
                         provenance.append(
                             {
                                 "entity_type": node_type,
-                                "entity_value": str(value),
+                                "entity_value": str(
+                                    value
+                                ),
                                 "source": item.get(
                                     "source",
                                     "Unknown",
@@ -688,10 +968,13 @@ def get_subdomain_graph(
                     or node.get("method")
                     or node.get("recorded_at")
                 ):
+
                     provenance.append(
                         {
                             "entity_type": node_type,
-                            "entity_value": str(value),
+                            "entity_value": str(
+                                value
+                            ),
                             "source": node.get(
                                 "source",
                                 "Unknown",
@@ -708,7 +991,7 @@ def get_subdomain_graph(
                     )
 
             print(
-                f"[+] Targeted subdomain graph loaded: "
+                "[+] Targeted subdomain graph loaded: "
                 f"{subdomain}"
             )
 
@@ -733,17 +1016,20 @@ def get_all_subdomains(
     password: str,
 ):
     """
-    Retrieve the COMPLETE subdomain inventory.
-
-    No graph visualization limit is applied here.
+    Retrieve the complete subdomain inventory.
     """
 
     domain = normalize_domain(domain)
 
-    driver = create_neo4j_driver(password)
+    driver = create_neo4j_driver(
+        password
+    )
 
     try:
-        with driver.session(database="neo4j") as session:
+
+        with driver.session(
+            database="neo4j"
+        ) as session:
 
             query = """
             MATCH (d:Domain {value: $domain})
@@ -778,7 +1064,10 @@ def create_subdomain_pdf(
     domain: str,
     subdomains: list,
 ):
-    """Generate a PDF containing the complete subdomain list."""
+    """
+    Generate a PDF containing the complete
+    subdomain list.
+    """
 
     buffer = io.BytesIO()
 
@@ -789,7 +1078,10 @@ def create_subdomain_pdf(
         leftMargin=15 * mm,
         topMargin=15 * mm,
         bottomMargin=15 * mm,
-        title=f"{domain} - Subdomain Intelligence Report",
+        title=(
+            f"{domain} - "
+            "Subdomain Intelligence Report"
+        ),
         author="Domain-Centric OSINT",
     )
 
@@ -837,18 +1129,31 @@ def create_subdomain_pdf(
             f"<b>Target Domain:</b> {domain}",
             normal_style,
         ),
-        Spacer(1, 5 * mm),
+        Spacer(
+            1,
+            5 * mm,
+        ),
         Paragraph(
-            f"<b>Total Subdomains:</b> {len(subdomains):,}",
+            f"<b>Total Subdomains:</b> "
+            f"{len(subdomains):,}",
             normal_style,
         ),
-        Spacer(1, 8 * mm),
+        Spacer(
+            1,
+            8 * mm,
+        ),
     ]
 
     table_data = [
         [
-            Paragraph("<b>#</b>", cell_style),
-            Paragraph("<b>Subdomain</b>", cell_style),
+            Paragraph(
+                "<b>#</b>",
+                cell_style,
+            ),
+            Paragraph(
+                "<b>Subdomain</b>",
+                cell_style,
+            ),
         ]
     ]
 
@@ -873,7 +1178,8 @@ def create_subdomain_pdf(
         )
 
         if (
-            len(table_data) >= chunk_size + 1
+            len(table_data)
+            >= chunk_size + 1
             or index == len(subdomains)
         ):
 
@@ -893,7 +1199,9 @@ def create_subdomain_pdf(
                             "BACKGROUND",
                             (0, 0),
                             (-1, 0),
-                            colors.HexColor("#172033"),
+                            colors.HexColor(
+                                "#172033"
+                            ),
                         ),
                         (
                             "TEXTCOLOR",
@@ -946,14 +1254,23 @@ def create_subdomain_pdf(
 
             table_data = [
                 [
-                    Paragraph("<b>#</b>", cell_style),
-                    Paragraph("<b>Subdomain</b>", cell_style),
+                    Paragraph(
+                        "<b>#</b>",
+                        cell_style,
+                    ),
+                    Paragraph(
+                        "<b>Subdomain</b>",
+                        cell_style,
+                    ),
                 ]
             ]
 
             if index < len(subdomains):
                 story.append(
-                    Spacer(1, 5 * mm)
+                    Spacer(
+                        1,
+                        5 * mm,
+                    )
                 )
 
     document.build(story)
@@ -969,8 +1286,11 @@ def create_subdomain_pdf(
 
 @app.get("/")
 def root():
+
     return {
-        "message": "Domain-Centric OSINT API is running"
+        "message": (
+            "Domain-Centric OSINT API is running"
+        )
     }
 
 
@@ -980,13 +1300,14 @@ def root():
 
 @app.get("/health")
 def health():
+
     return {
         "status": "ok"
     }
 
 
 # ============================================================
-# PROGRESS STREAM
+# GLOBAL PROGRESS STREAM
 # ============================================================
 
 @app.get("/analyze/progress")
@@ -994,34 +1315,184 @@ async def analyze_progress():
 
     async def event_generator():
 
-        subscriber = deque(maxlen=10)
+        subscriber = deque(
+            maxlen=SCAN_PROGRESS_HISTORY_LIMIT
+        )
 
-        progress_subscribers.append(subscriber)
+        progress_subscribers.append(
+            subscriber
+        )
 
         try:
 
-            for update in progress_queue:
+            # ------------------------------------------------
+            # SEND RECENT GLOBAL HISTORY
+            # ------------------------------------------------
+
+            for update in list(
+                progress_queue
+            ):
+
                 yield (
-                    f"data: {json.dumps(update)}\n\n"
+                    f"data: "
+                    f"{json.dumps(update)}\n\n"
                 )
+
+            # ------------------------------------------------
+            # WAIT FOR NEW UPDATES
+            # ------------------------------------------------
 
             while True:
 
                 if subscriber:
+
                     update = subscriber.popleft()
 
                     yield (
-                        f"data: {json.dumps(update)}\n\n"
+                        f"data: "
+                        f"{json.dumps(update)}\n\n"
                     )
 
                 else:
-                    await asyncio.sleep(0.1)
+
+                    await asyncio.sleep(
+                        0.1
+                    )
 
         finally:
 
             if subscriber in progress_subscribers:
+
                 progress_subscribers.remove(
                     subscriber
+                )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============================================================
+# SCAN-SPECIFIC PROGRESS STREAM
+# ============================================================
+
+@app.get("/analyze/progress/stream/{scan_id}")
+async def analyze_scan_progress_stream(
+    scan_id: str,
+):
+    """
+    Scan-specific SSE endpoint.
+
+    This is preferable for the frontend because updates
+    from previous scans cannot leak into the current scan.
+    """
+
+    if scan_id not in progress_store:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Scan not found",
+        )
+
+    async def event_generator():
+
+        subscriber = deque(
+            maxlen=SCAN_PROGRESS_HISTORY_LIMIT
+        )
+
+        if scan_id not in scan_subscribers:
+
+            scan_subscribers[scan_id] = []
+
+        scan_subscribers[scan_id].append(
+            subscriber
+        )
+
+        try:
+
+            # ------------------------------------------------
+            # REPLAY THIS SCAN ONLY
+            # ------------------------------------------------
+
+            for update in list(
+                scan_progress_history.get(
+                    scan_id,
+                    [],
+                )
+            ):
+
+                yield (
+                    f"data: "
+                    f"{json.dumps(update)}\n\n"
+                )
+
+            # ------------------------------------------------
+            # LIVE UPDATES
+            # ------------------------------------------------
+
+            while True:
+
+                if subscriber:
+
+                    update = subscriber.popleft()
+
+                    yield (
+                        f"data: "
+                        f"{json.dumps(update)}\n\n"
+                    )
+
+                else:
+
+                    # If the scan is finished and there
+                    # are no more events, continue briefly
+                    # so the final event can be consumed.
+                    current_status = progress_store.get(
+                        scan_id,
+                        {},
+                    ).get(
+                        "status"
+                    )
+
+                    if current_status in {
+                        "completed",
+                        "cancelled",
+                        "failed",
+                    }:
+
+                        await asyncio.sleep(
+                            0.25
+                        )
+
+                    else:
+
+                        await asyncio.sleep(
+                            0.1
+                        )
+
+        finally:
+
+            subscribers = scan_subscribers.get(
+                scan_id,
+                [],
+            )
+
+            if subscriber in subscribers:
+
+                subscribers.remove(
+                    subscriber
+                )
+
+            if not subscribers:
+
+                scan_subscribers.pop(
+                    scan_id,
+                    None,
                 )
 
     return StreamingResponse(
@@ -1040,23 +1511,42 @@ async def analyze_progress():
 # ============================================================
 
 @app.get("/analyze/progress/{scan_id}")
-async def get_progress_by_scan_id(scan_id: str):
+async def get_progress_by_scan_id(
+    scan_id: str,
+):
+
+    # --------------------------------------------------------
+    # FINAL / CURRENT STATE
+    # --------------------------------------------------------
 
     if scan_id in progress_store:
+
         return progress_store[scan_id]
 
+    # --------------------------------------------------------
+    # ACTIVE STATE FALLBACK
+    # --------------------------------------------------------
+
     if scan_id in active_scans:
+
         return {
-            "progress": active_scans[scan_id].get(
+            "scan_id": scan_id,
+            "progress": active_scans[
+                scan_id
+            ].get(
                 "progress",
                 0,
             ),
-            "status": active_scans[scan_id].get(
+            "status": active_scans[
+                scan_id
+            ].get(
                 "status",
                 "running",
             ),
             "steps": {},
-            "domain": active_scans[scan_id].get(
+            "domain": active_scans[
+                scan_id
+            ].get(
                 "domain",
                 "",
             ),
@@ -1073,93 +1563,163 @@ async def get_progress_by_scan_id(scan_id: str):
 # ============================================================
 
 @app.post("/analyze/stop")
-async def stop_analysis(request: StopRequest):
+async def stop_analysis(
+    request: StopRequest,
+):
 
     domain = request.domain
     scan_id = request.scan_id
 
     print(
-        f"[*] Stop request received: "
-        f"domain={domain}, scan_id={scan_id}"
+        "[*] Stop request received: "
+        f"domain={domain}, "
+        f"scan_id={scan_id}"
     )
 
-    # --------------------------------------------------------
-    # CANCEL ALL SCANS FOR DOMAIN
-    # --------------------------------------------------------
+    # ========================================================
+    # SPECIFIC SCAN
+    # ========================================================
 
-    if domain:
+    if scan_id:
 
-        domain = normalize_domain(domain)
+        if scan_id not in active_scans:
 
-        cancelled_count = 0
+            # The scan may already have completed.
+            if scan_id in progress_store:
 
-        for sid in list(active_scans):
-
-            if (
-                normalize_domain(
-                    active_scans[sid].get(
-                        "domain",
-                        "",
-                    )
-                )
-                == domain
-            ):
-
-                scan_cancelled[sid] = True
-                cancelled_count += 1
-
-                if sid in progress_store:
-                    progress_store[sid][
-                        "status"
-                    ] = "cancelled"
-
-                    progress_store[sid][
-                        "progress"
-                    ] = 0
-
-                print(
-                    f"[*] Cancelled scan "
-                    f"{sid} for domain {domain}"
+                current_status = progress_store[
+                    scan_id
+                ].get(
+                    "status"
                 )
 
-        if cancelled_count:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Scan {scan_id} is already "
+                        f"{current_status}."
+                    ),
+                }
+
             return {
-                "success": True,
-                "message": (
-                    f"Cancelled "
-                    f"{cancelled_count} scan(s) "
-                    f"for {domain}"
-                ),
+                "success": False,
+                "message": "Scan not found.",
             }
 
-    # --------------------------------------------------------
-    # CANCEL SPECIFIC SCAN
-    # --------------------------------------------------------
-
-    if scan_id and scan_id in active_scans:
+        # ----------------------------------------------------
+        # CANCEL
+        # ----------------------------------------------------
 
         scan_cancelled[scan_id] = True
 
-        if scan_id in progress_store:
-            progress_store[scan_id][
-                "status"
-            ] = "cancelled"
+        set_scan_status(
+            scan_id,
+            "cancelled",
+            0,
+        )
 
-            progress_store[scan_id][
-                "progress"
-            ] = 0
+        publish_progress(
+            {
+                "scan_id": scan_id,
+                "step": "cancelled",
+                "progress": 0,
+                "status": "cancelled",
+                "message": "Scan cancelled by user",
+            }
+        )
 
         print(
-            f"[*] Cancelled scan {scan_id}"
+            f"[*] Cancel signal sent for "
+            f"scan {scan_id}"
         )
 
         return {
             "success": True,
+            "scan_id": scan_id,
             "message": (
-                f"Stop signal sent "
-                f"for scan {scan_id}"
+                f"Stop signal sent for scan "
+                f"{scan_id}"
             ),
         }
+
+    # ========================================================
+    # CANCEL RUNNING SCANS FOR DOMAIN
+    # ========================================================
+
+    if domain:
+
+        domain = normalize_domain(
+            domain
+        )
+
+        cancelled_scan_ids = []
+
+        for sid, scan_info in list(
+            active_scans.items()
+        ):
+
+            # IMPORTANT:
+            # Only running scans are stored in active_scans.
+            if normalize_domain(
+                scan_info.get(
+                    "domain",
+                    "",
+                )
+            ) != domain:
+
+                continue
+
+            current_status = scan_info.get(
+                "status"
+            )
+
+            if current_status not in {
+                "running",
+            }:
+
+                continue
+
+            scan_cancelled[sid] = True
+
+            set_scan_status(
+                sid,
+                "cancelled",
+                0,
+            )
+
+            publish_progress(
+                {
+                    "scan_id": sid,
+                    "step": "cancelled",
+                    "progress": 0,
+                    "status": "cancelled",
+                    "message": (
+                        "Scan cancelled by user"
+                    ),
+                }
+            )
+
+            cancelled_scan_ids.append(
+                sid
+            )
+
+            print(
+                f"[*] Cancelled scan {sid} "
+                f"for domain {domain}"
+            )
+
+        if cancelled_scan_ids:
+
+            return {
+                "success": True,
+                "domain": domain,
+                "scan_ids": cancelled_scan_ids,
+                "message": (
+                    f"Cancelled "
+                    f"{len(cancelled_scan_ids)} "
+                    f"scan(s) for {domain}"
+                ),
+            }
 
     return {
         "success": True,
@@ -1172,9 +1732,24 @@ async def stop_analysis(request: StopRequest):
 # ============================================================
 
 @app.get("/analyze/status/{scan_id}")
-async def get_scan_status(scan_id: str):
+async def get_scan_status(
+    scan_id: str,
+):
+
+    # --------------------------------------------------------
+    # CURRENT / FINAL STATE
+    # --------------------------------------------------------
+
+    if scan_id in progress_store:
+
+        return progress_store[scan_id]
+
+    # --------------------------------------------------------
+    # ACTIVE STATE FALLBACK
+    # --------------------------------------------------------
 
     if scan_id in active_scans:
+
         return active_scans[scan_id]
 
     raise HTTPException(
@@ -1188,20 +1763,28 @@ async def get_scan_status(scan_id: str):
 # ============================================================
 
 @app.get("/subdomains")
-def get_subdomain_inventory(domain: str):
+def get_subdomain_inventory(
+    domain: str,
+):
 
-    domain = normalize_domain(domain)
+    domain = normalize_domain(
+        domain
+    )
 
     if not domain:
+
         raise HTTPException(
             status_code=400,
             detail="Domain cannot be empty.",
         )
 
     if not NEO4J_PASSWORD:
+
         raise HTTPException(
             status_code=500,
-            detail="Neo4j password is not configured.",
+            detail=(
+                "Neo4j password is not configured."
+            ),
         )
 
     try:
@@ -1220,7 +1803,7 @@ def get_subdomain_inventory(domain: str):
     except Exception as error:
 
         print(
-            f"[!] Failed to retrieve "
+            "[!] Failed to retrieve "
             f"subdomain inventory: {error}"
         )
 
@@ -1228,7 +1811,8 @@ def get_subdomain_inventory(domain: str):
             status_code=500,
             detail=(
                 "Failed to retrieve "
-                f"subdomain inventory: {str(error)}"
+                "subdomain inventory: "
+                f"{str(error)}"
             ),
         )
 
@@ -1242,35 +1826,36 @@ def get_specific_subdomain_graph(
     domain: str,
     subdomain: str,
 ):
-    """
-    Dynamically load ANY subdomain from the inventory.
 
-    Example:
+    domain = normalize_domain(
+        domain
+    )
 
-        /subdomains/graph
-        ?domain=geeksforgeeks.org
-        &subdomain=api.aa.geeksforgeeks.org
-    """
-
-    domain = normalize_domain(domain)
-    subdomain = normalize_domain(subdomain)
+    subdomain = normalize_domain(
+        subdomain
+    )
 
     if not domain:
+
         raise HTTPException(
             status_code=400,
             detail="Domain cannot be empty.",
         )
 
     if not subdomain:
+
         raise HTTPException(
             status_code=400,
             detail="Subdomain cannot be empty.",
         )
 
     if not NEO4J_PASSWORD:
+
         raise HTTPException(
             status_code=500,
-            detail="Neo4j password is not configured.",
+            detail=(
+                "Neo4j password is not configured."
+            ),
         )
 
     try:
@@ -1282,11 +1867,13 @@ def get_specific_subdomain_graph(
         )
 
         if not graph:
+
             raise HTTPException(
                 status_code=404,
                 detail=(
                     f"Subdomain '{subdomain}' "
-                    f"was not found for '{domain}'."
+                    f"was not found for "
+                    f"'{domain}'."
                 ),
             )
 
@@ -1301,14 +1888,15 @@ def get_specific_subdomain_graph(
     except Exception as error:
 
         print(
-            f"[!] Failed to load subdomain graph: "
-            f"{error}"
+            "[!] Failed to load "
+            f"subdomain graph: {error}"
         )
 
         raise HTTPException(
             status_code=500,
             detail=(
-                "Failed to load subdomain graph: "
+                "Failed to load "
+                "subdomain graph: "
                 f"{str(error)}"
             ),
         )
@@ -1319,17 +1907,23 @@ def get_specific_subdomain_graph(
 # ============================================================
 
 @app.get("/subdomains/pdf")
-def download_subdomains_pdf(domain: str):
+def download_subdomains_pdf(
+    domain: str,
+):
 
-    domain = normalize_domain(domain)
+    domain = normalize_domain(
+        domain
+    )
 
     if not domain:
+
         raise HTTPException(
             status_code=400,
             detail="Domain cannot be empty.",
         )
 
     if not NEO4J_PASSWORD:
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -1341,7 +1935,7 @@ def download_subdomains_pdf(domain: str):
     try:
 
         print(
-            f"[*] Generating complete "
+            "[*] Generating complete "
             f"subdomain PDF for: {domain}"
         )
 
@@ -1351,6 +1945,7 @@ def download_subdomains_pdf(domain: str):
         )
 
         if not subdomains:
+
             raise HTTPException(
                 status_code=404,
                 detail=(
@@ -1361,7 +1956,7 @@ def download_subdomains_pdf(domain: str):
 
         print(
             f"[+] Found {len(subdomains):,} "
-            f"subdomains for PDF export."
+            "subdomains for PDF export."
         )
 
         pdf_buffer = create_subdomain_pdf(
@@ -1378,7 +1973,7 @@ def download_subdomains_pdf(domain: str):
             media_type="application/pdf",
             headers={
                 "Content-Disposition": (
-                    f'attachment; '
+                    "attachment; "
                     f'filename="{filename}"'
                 )
             },
@@ -1390,8 +1985,8 @@ def download_subdomains_pdf(domain: str):
     except Exception as error:
 
         print(
-            f"[!] Subdomain PDF generation failed: "
-            f"{error}"
+            "[!] Subdomain PDF "
+            f"generation failed: {error}"
         )
 
         raise HTTPException(
@@ -1408,19 +2003,27 @@ def download_subdomains_pdf(domain: str):
 # ============================================================
 
 @app.post("/analyze")
-def analyze_domain(request: AnalyzeRequest):
+def analyze_domain(
+    request: AnalyzeRequest,
+):
 
     domain = normalize_domain(
         request.domain
     )
 
+    # ========================================================
+    # VALIDATION
+    # ========================================================
+
     if not domain:
+
         raise HTTPException(
             status_code=400,
             detail="Domain cannot be empty.",
         )
 
     if not NEO4J_PASSWORD:
+
         raise HTTPException(
             status_code=500,
             detail=(
@@ -1429,12 +2032,22 @@ def analyze_domain(request: AnalyzeRequest):
             ),
         )
 
+    # ========================================================
+    # CREATE UNIQUE SCAN ID
+    # ========================================================
+
     scan_id = (
         f"{domain}_"
-        f"{datetime.now().timestamp()}"
+        f"{datetime.now().strftime('%Y%m%d%H%M%S')}_"
+        f"{uuid.uuid4().hex[:8]}"
     )
 
+    # ========================================================
+    # INITIALIZE SCAN
+    # ========================================================
+
     active_scans[scan_id] = {
+        "scan_id": scan_id,
         "domain": domain,
         "status": "running",
         "progress": 0,
@@ -1444,41 +2057,89 @@ def analyze_domain(request: AnalyzeRequest):
     scan_cancelled[scan_id] = False
 
     progress_store[scan_id] = {
+        "scan_id": scan_id,
         "domain": domain,
         "progress": 0,
         "status": "running",
         "steps": {},
+        "started_at": active_scans[
+            scan_id
+        ]["started_at"],
     }
 
+    scan_progress_history[scan_id] = deque(
+        maxlen=SCAN_PROGRESS_HISTORY_LIMIT
+    )
+
     print("\n" + "=" * 60)
+
     print(
         f"[*] Starting analysis for: {domain}"
     )
+
     print(
         f"[*] Scan ID: {scan_id}"
     )
+
     print("=" * 60)
 
-    # --------------------------------------------------------
+    # ========================================================
     # PROGRESS CALLBACK
-    # --------------------------------------------------------
+    # ========================================================
 
     def progress_callback(update):
 
-        if scan_cancelled.get(
-            scan_id,
-            False,
+        # ----------------------------------------------------
+        # DO NOT PROCESS OLD / CANCELLED SCAN UPDATES
+        # ----------------------------------------------------
+
+        if is_scan_cancelled(
+            scan_id
         ):
+
             return
 
-        progress_value = update.get(
+        if scan_id not in active_scans:
+
+            return
+
+        # ----------------------------------------------------
+        # COPY UPDATE
+        # ----------------------------------------------------
+
+        progress_update = dict(
+            update
+        )
+
+        # IMPORTANT:
+        # Always attach scan_id.
+        progress_update["scan_id"] = scan_id
+
+        progress_value = progress_update.get(
             "progress",
             0,
         )
 
+        status = progress_update.get(
+            "status",
+            "running",
+        )
+
+        # ----------------------------------------------------
+        # UPDATE ACTIVE STATE
+        # ----------------------------------------------------
+
         active_scans[scan_id][
             "progress"
         ] = progress_value
+
+        active_scans[scan_id][
+            "status"
+        ] = status
+
+        # ----------------------------------------------------
+        # UPDATE STORED STATE
+        # ----------------------------------------------------
 
         progress_store[scan_id][
             "progress"
@@ -1486,41 +2147,45 @@ def analyze_domain(request: AnalyzeRequest):
 
         progress_store[scan_id][
             "status"
-        ] = update.get(
-            "status",
-            "running",
+        ] = status
+
+        step = progress_update.get(
+            "step"
         )
 
-        step = update.get("step")
-
         if step:
+
             progress_store[scan_id][
                 "steps"
-            ][step] = update
+            ][step] = progress_update
 
-        publish_progress(update)
+        # ----------------------------------------------------
+        # PUBLISH
+        # ----------------------------------------------------
+
+        publish_progress(
+            progress_update
+        )
 
     try:
 
-        # ----------------------------------------------------
+        # ====================================================
         # PRE-START CANCELLATION
-        # ----------------------------------------------------
+        # ====================================================
 
-        if scan_cancelled.get(
-            scan_id,
-            False,
+        if is_scan_cancelled(
+            scan_id
         ):
 
-            active_scans[scan_id][
-                "status"
-            ] = "cancelled"
-
-            progress_store[scan_id][
-                "status"
-            ] = "cancelled"
+            set_scan_status(
+                scan_id,
+                "cancelled",
+                0,
+            )
 
             publish_progress(
                 {
+                    "scan_id": scan_id,
                     "step": "cancelled",
                     "progress": 0,
                     "status": "cancelled",
@@ -1530,45 +2195,49 @@ def analyze_domain(request: AnalyzeRequest):
                 }
             )
 
+            remove_active_scan(
+                scan_id
+            )
+
             return {
                 "success": False,
+                "scan_id": scan_id,
                 "message": "Scan cancelled",
             }
 
-        # ----------------------------------------------------
+        # ====================================================
         # RUN PIPELINE
-        # ----------------------------------------------------
+        # ====================================================
 
         result = run_osint_pipeline(
             domain,
             NEO4J_PASSWORD,
             progress_callback=progress_callback,
             scan_id=scan_id,
-            is_cancelled=lambda: scan_cancelled.get(
-                scan_id,
-                False,
+            is_cancelled=lambda: (
+                is_scan_cancelled(
+                    scan_id
+                )
             ),
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # POST-PIPELINE CANCELLATION
-        # ----------------------------------------------------
+        # ====================================================
 
-        if scan_cancelled.get(
-            scan_id,
-            False,
+        if is_scan_cancelled(
+            scan_id
         ):
 
-            active_scans[scan_id][
-                "status"
-            ] = "cancelled"
-
-            progress_store[scan_id][
-                "status"
-            ] = "cancelled"
+            set_scan_status(
+                scan_id,
+                "cancelled",
+                0,
+            )
 
             publish_progress(
                 {
+                    "scan_id": scan_id,
                     "step": "cancelled",
                     "progress": 0,
                     "status": "cancelled",
@@ -1578,27 +2247,33 @@ def analyze_domain(request: AnalyzeRequest):
                 }
             )
 
+            remove_active_scan(
+                scan_id
+            )
+
             return {
                 "success": False,
+                "scan_id": scan_id,
                 "message": "Scan cancelled",
             }
 
-        # ----------------------------------------------------
+        # ====================================================
         # GRAPH ANALYSIS
-        # ----------------------------------------------------
+        # ====================================================
 
         analysis = result.get(
             "graph_analysis"
         )
 
         if not analysis:
+
             raise RuntimeError(
                 "Graph analysis data was not returned."
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # INFRASTRUCTURE
-        # ----------------------------------------------------
+        # ====================================================
 
         infrastructure = analysis.get(
             "infrastructure",
@@ -1630,9 +2305,9 @@ def analyze_domain(request: AnalyzeRequest):
             [],
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # INITIAL GRAPH
-        # ----------------------------------------------------
+        # ====================================================
 
         print(
             "[*] Extracting graph "
@@ -1644,9 +2319,9 @@ def analyze_domain(request: AnalyzeRequest):
             NEO4J_PASSWORD,
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # PROVENANCE
-        # ----------------------------------------------------
+        # ====================================================
 
         print(
             "[*] Extracting provenance data..."
@@ -1664,58 +2339,102 @@ def analyze_domain(request: AnalyzeRequest):
         print(
             f"[+] Extracted "
             f"{len(all_provenance)} "
-            f"provenance records."
+            "provenance records."
         )
 
         graph["provenance"] = all_provenance
 
-        # ----------------------------------------------------
+        # ====================================================
         # COMPLETE
-        # ----------------------------------------------------
+        # ====================================================
 
-        active_scans[scan_id][
-            "status"
-        ] = "completed"
+        completion_time = (
+            datetime.now().isoformat()
+        )
 
-        active_scans[scan_id][
-            "progress"
-        ] = 100
-
-        progress_store[scan_id][
-            "status"
-        ] = "completed"
+        set_scan_status(
+            scan_id,
+            "completed",
+            100,
+        )
 
         progress_store[scan_id][
-            "progress"
-        ] = 100
+            "completed_at"
+        ] = completion_time
 
         # ----------------------------------------------------
+        # FINAL PROGRESS EVENT
+        # ----------------------------------------------------
+
+        publish_progress(
+            {
+                "scan_id": scan_id,
+                "step": "complete",
+                "progress": 100,
+                "status": "completed",
+                "message": (
+                    "Domain analysis complete."
+                ),
+            }
+        )
+
+        # ----------------------------------------------------
+        # REMOVE FROM ACTIVE SCANS
+        #
+        # IMPORTANT:
+        # A completed scan must NOT remain in active_scans.
+        # Otherwise a later stop request for the same domain
+        # can incorrectly affect this old scan.
+        # ----------------------------------------------------
+
+        remove_active_scan(
+            scan_id
+        )
+
+        # ====================================================
         # RESPONSE
-        # ----------------------------------------------------
+        # ====================================================
+
+        raw_data = result.get(
+            "raw_data",
+            {},
+        )
+
+        port_scan_data = raw_data.get(
+            "port_scan",
+            {},
+        )
 
         response = {
             "success": True,
+
             "scan_id": scan_id,
+
             "domain": result.get(
                 "domain",
                 domain,
             ),
+
             "statistics": analysis.get(
                 "statistics",
                 {},
             ),
+
             "relationships": analysis.get(
                 "relationships",
                 {},
             ),
+
             "ip_version_summary": analysis.get(
                 "ip_version_summary",
                 {},
             ),
+
             "subdomain_patterns": analysis.get(
                 "subdomain_patterns",
                 {},
             ),
+
             "infrastructure": {
                 "subdomains": subdomains,
                 "subdomain_count": len(
@@ -1726,35 +2445,46 @@ def analyze_domain(request: AnalyzeRequest):
                 "organizations": organizations,
                 "certificates": certificates,
             },
+
             "provenance": all_provenance,
+
             "observations": analysis.get(
                 "observations",
                 [],
             ),
+
             "virustotal": analysis.get(
                 "virustotal",
                 {},
             ),
+
             "ai_report": result.get(
                 "ai_report",
                 "",
             ),
+
             "graph": graph,
+
+            "port_scan": port_scan_data,
         }
 
         print("=" * 60)
+
         print(
             "[+] Domain analysis complete."
         )
-        print("=" * 60)
 
-        # Keep completed progress available for the frontend.
-        scan_cancelled.pop(
-            scan_id,
-            None,
+        print(
+            f"[+] Scan ID: {scan_id}"
         )
 
+        print("=" * 60)
+
         return response
+
+    # ========================================================
+    # VALIDATION ERROR
+    # ========================================================
 
     except ValueError as error:
 
@@ -1762,33 +2492,78 @@ def analyze_domain(request: AnalyzeRequest):
             f"[!] Validation error: {error}"
         )
 
-        active_scans[scan_id][
-            "status"
-        ] = "failed"
+        set_scan_status(
+            scan_id,
+            "failed",
+        )
 
         progress_store[scan_id][
-            "status"
-        ] = "failed"
+            "error"
+        ] = str(error)
+
+        progress_store[scan_id][
+            "completed_at"
+        ] = datetime.now().isoformat()
+
+        publish_progress(
+            {
+                "scan_id": scan_id,
+                "step": "failed",
+                "progress": 0,
+                "status": "failed",
+                "message": str(error),
+            }
+        )
+
+        remove_active_scan(
+            scan_id
+        )
 
         raise HTTPException(
             status_code=400,
             detail=str(error),
         )
 
+    # ========================================================
+    # GENERAL ERROR
+    # ========================================================
+
     except Exception as error:
 
         print(
-            f"[!] Pipeline execution failed: "
+            "[!] Pipeline execution failed: "
             f"{error}"
         )
 
-        active_scans[scan_id][
-            "status"
-        ] = "failed"
+        set_scan_status(
+            scan_id,
+            "failed",
+        )
 
         progress_store[scan_id][
-            "status"
-        ] = "failed"
+            "error"
+        ] = str(error)
+
+        progress_store[scan_id][
+            "completed_at"
+        ] = datetime.now().isoformat()
+
+        publish_progress(
+            {
+                "scan_id": scan_id,
+                "step": "failed",
+                "progress": 0,
+                "status": "failed",
+                "message": (
+                    f"Pipeline execution failed: "
+                    f"{str(error)}"
+                ),
+            }
+        )
+
+        remove_active_scan(
+            scan_id
+        )
 
         raise HTTPException(
             status_code=500,

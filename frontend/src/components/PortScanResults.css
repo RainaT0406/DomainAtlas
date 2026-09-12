@@ -1,0 +1,430 @@
+/* ============================================================
+   DOMAINATLAS — PORT SCAN RESULTS
+   ============================================================ */
+
+.port-scan-panel {
+  border-color: var(--border-strong);
+}
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+
+.port-scan-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+  text-align: center;
+  background: var(--surface-2);
+  border-radius: 12px;
+  border: 1px dashed var(--border-strong);
+}
+
+.port-scan-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+  border: 1px solid var(--border-soft);
+}
+
+.port-scan-empty h4 {
+  font-size: 1.1rem;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+}
+
+.port-scan-empty p {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  max-width: 500px;
+  margin-bottom: 1.5rem;
+}
+
+/* ============================================================
+   COMMON PORTS
+   ============================================================ */
+
+.port-scan-common-ports {
+  width: 100%;
+  max-width: 600px;
+}
+
+.port-scan-common-ports > span {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+.common-ports-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+}
+
+.port-tag {
+  padding: 0.25rem 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-family: monospace;
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.port-tag:hover {
+  border-color: var(--forest-mid);
+  color: var(--text);
+}
+
+/* ============================================================
+   SUMMARY CARDS
+   ============================================================ */
+
+.port-scan-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.port-stat-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.port-stat-card:hover {
+  border-color: var(--forest-mid);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.port-stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--forest-mid);
+  flex-shrink: 0;
+}
+
+.port-stat-label {
+  display: block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.port-stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+/* ============================================================
+   PORT DETAILS
+   ============================================================ */
+
+.port-scan-details {
+  color: var(--text);
+}
+
+.port-scan-details h4 {
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+}
+
+.ip-port-group {
+  margin-bottom: 1rem;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.ip-port-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+}
+
+.ip-address {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.ip-address svg {
+  color: var(--forest-mid);
+}
+
+.ip-address span {
+  color: var(--text);
+}
+
+.ip-port-count .port-badge {
+  padding: 0.15rem 0.6rem;
+  background: var(--forest-mid);
+  color: #ffffff;
+  border-radius: 12px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+/* ============================================================
+   PORT LIST
+   ============================================================ */
+
+.port-list {
+  padding: 0.5rem;
+  background: var(--surface);
+}
+
+.port-item {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+  transition: background 0.15s ease;
+  color: var(--text);
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.port-item:last-child {
+  border-bottom: none;
+}
+
+.port-item:hover {
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+/* ============================================================
+   PORT NUMBER / PROTOCOL
+   ============================================================ */
+
+.port-number {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+  width: 90px;
+  flex-shrink: 0;
+}
+
+.port-num {
+  font-family: monospace;
+  font-weight: 700;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.port-protocol {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  padding: 0.1rem 0.3rem;
+  background: var(--surface-2);
+  border-radius: 3px;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   SERVICE
+   ============================================================ */
+
+.port-service {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--text);
+  overflow: hidden;
+}
+
+.service-name {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   BANNER
+   ============================================================ */
+
+.port-banner {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: monospace;
+  background: var(--surface-2);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.port-banner-full {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.banner-label {
+  display: block;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.port-banner-full code {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  font-size: 0.7rem;
+  font-family: monospace;
+  color: var(--text);
+  background: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+
+/* ============================================================
+   DASHBOARD SUMMARY
+   ============================================================ */
+
+.port-scan-summary-dashboard {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: var(--surface-2);
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+}
+
+.port-scan-summary-dashboard h3 {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.port-stats {
+  display: flex;
+  gap: 2rem;
+}
+
+.port-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.port-stat span:first-child {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.port-stat span:last-child {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .port-scan-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .port-stat-card:last-child {
+    grid-column: span 2;
+  }
+
+  .port-item {
+    flex-wrap: wrap;
+  }
+
+  .port-number {
+    min-width: 60px;
+  }
+
+  .port-banner-full {
+    margin-top: 0.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .port-scan-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .port-stat-card:last-child {
+    grid-column: span 1;
+  }
+
+  .ip-port-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .port-stats {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+}

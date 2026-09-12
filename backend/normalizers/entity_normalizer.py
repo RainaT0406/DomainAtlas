@@ -1,5 +1,7 @@
+
 import json
 import os
+import hashlib
 from datetime import datetime, timezone
 
 
@@ -22,7 +24,8 @@ def add_entity(
     value,
     source,
     method,
-    recorded_at
+    recorded_at,
+    properties=None,
 ):
     if value is None:
         return
@@ -34,13 +37,13 @@ def add_entity(
 
     key = (
         entity_type,
-        value
+        value,
     )
 
     provenance = {
         "source": source,
         "method": method,
-        "recorded_at": recorded_at
+        "recorded_at": recorded_at,
     }
 
     # ---------------------------------------------------------
@@ -48,11 +51,18 @@ def add_entity(
     # ---------------------------------------------------------
 
     if key in entity_index:
-
         entity = entity_index[key]
 
         if provenance not in entity["provenance"]:
             entity["provenance"].append(provenance)
+
+        # Preserve/update additional properties.
+        if properties:
+            entity.setdefault("properties", {})
+
+            for prop_key, prop_value in properties.items():
+                if prop_value is not None:
+                    entity["properties"][prop_key] = prop_value
 
         return
 
@@ -65,11 +75,13 @@ def add_entity(
         "value": value,
         "provenance": [
             provenance
-        ]
+        ],
     }
 
-    entities.append(entity)
+    if properties:
+        entity["properties"] = properties
 
+    entities.append(entity)
     entity_index[key] = entity
 
 
@@ -87,7 +99,8 @@ def add_relationship(
     to_value,
     source,
     method,
-    recorded_at
+    recorded_at,
+    properties=None,
 ):
     if not from_value or not to_value:
         return
@@ -95,18 +108,21 @@ def add_relationship(
     from_value = str(from_value).strip()
     to_value = str(to_value).strip()
 
+    if not from_value or not to_value:
+        return
+
     relationship_key = (
         from_type,
         from_value,
         relationship,
         to_type,
-        to_value
+        to_value,
     )
 
     provenance = {
         "source": source,
         "method": method,
-        "recorded_at": recorded_at
+        "recorded_at": recorded_at,
     }
 
     # ---------------------------------------------------------
@@ -114,15 +130,26 @@ def add_relationship(
     # ---------------------------------------------------------
 
     if relationship_key in relationship_index:
-
-        existing_relationship = (
-            relationship_index[relationship_key]
-        )
+        existing_relationship = relationship_index[
+            relationship_key
+        ]
 
         if provenance not in existing_relationship["provenance"]:
             existing_relationship["provenance"].append(
                 provenance
             )
+
+        if properties:
+            existing_relationship.setdefault(
+                "properties",
+                {},
+            )
+
+            for prop_key, prop_value in properties.items():
+                if prop_value is not None:
+                    existing_relationship["properties"][
+                        prop_key
+                    ] = prop_value
 
         return
 
@@ -133,26 +160,26 @@ def add_relationship(
     new_relationship = {
         "from": {
             "type": from_type,
-            "value": from_value
+            "value": from_value,
         },
-
         "relationship": relationship,
-
         "to": {
             "type": to_type,
-            "value": to_value
+            "value": to_value,
         },
-
         "provenance": [
             provenance
-        ]
+        ],
     }
+
+    if properties:
+        new_relationship["properties"] = properties
 
     relationships.append(new_relationship)
 
-    relationship_index[relationship_key] = (
-        new_relationship
-    )
+    relationship_index[
+        relationship_key
+    ] = new_relationship
 
 
 # =============================================================
@@ -169,6 +196,14 @@ def normalize_data(data):
 
     domain = data.get("domain")
 
+    if domain:
+        domain = (
+            str(domain)
+            .strip()
+            .lower()
+            .rstrip(".")
+        )
+
     # One timestamp for this normalization run.
     recorded_at = current_timestamp()
 
@@ -177,7 +212,6 @@ def normalize_data(data):
     # =========================================================
 
     if domain:
-
         add_entity(
             entities,
             entity_index,
@@ -185,7 +219,7 @@ def normalize_data(data):
             domain,
             "User Input",
             "Domain supplied by analyst",
-            recorded_at
+            recorded_at,
         )
 
     # =========================================================
@@ -209,7 +243,7 @@ def normalize_data(data):
 
             sources = subdomain_data.get(
                 "sources",
-                []
+                [],
             )
 
             if not isinstance(sources, list):
@@ -218,12 +252,14 @@ def normalize_data(data):
             if not subdomain:
                 continue
 
+            subdomain = str(subdomain).strip()
+
+            if not subdomain:
+                continue
+
             # -------------------------------------------------
             # Add Subdomain Entity
             # -------------------------------------------------
-
-            # If both tools found it, preserve both as
-            # separate provenance records.
 
             if sources:
 
@@ -236,7 +272,7 @@ def normalize_data(data):
                         subdomain,
                         source,
                         "Subdomain discovery",
-                        recorded_at
+                        recorded_at,
                     )
 
             else:
@@ -248,7 +284,7 @@ def normalize_data(data):
                     subdomain,
                     "Subdomain Enumeration",
                     "Subdomain discovery",
-                    recorded_at
+                    recorded_at,
                 )
 
             # -------------------------------------------------
@@ -269,7 +305,7 @@ def normalize_data(data):
                         subdomain,
                         source,
                         "Subdomain discovery",
-                        recorded_at
+                        recorded_at,
                     )
 
             else:
@@ -284,13 +320,11 @@ def normalize_data(data):
                     subdomain,
                     "Subdomain Enumeration",
                     "Subdomain discovery",
-                    recorded_at
+                    recorded_at,
                 )
 
         # -----------------------------------------------------
         # BACKWARD COMPATIBILITY
-        #
-        # Supports old format:
         #
         # "subdomains": [
         #     "www.example.com"
@@ -311,7 +345,7 @@ def normalize_data(data):
                 subdomain,
                 "Subdomain Enumeration",
                 "Subdomain discovery",
-                recorded_at
+                recorded_at,
             )
 
             add_relationship(
@@ -324,7 +358,7 @@ def normalize_data(data):
                 subdomain,
                 "Subdomain Enumeration",
                 "Subdomain discovery",
-                recorded_at
+                recorded_at,
             )
 
     # =========================================================
@@ -348,7 +382,7 @@ def normalize_data(data):
             ip,
             "DNS",
             "DNS resolution",
-            recorded_at
+            recorded_at,
         )
 
         add_relationship(
@@ -361,7 +395,7 @@ def normalize_data(data):
             ip,
             "DNS",
             "DNS resolution",
-            recorded_at
+            recorded_at,
         )
 
     # =========================================================
@@ -391,7 +425,7 @@ def normalize_data(data):
             ip,
             "IP Metadata",
             "IP metadata lookup",
-            recorded_at
+            recorded_at,
         )
 
         # -----------------------------------------------------
@@ -413,7 +447,7 @@ def normalize_data(data):
                     asn,
                     "IP Metadata",
                     "IP to ASN lookup",
-                    recorded_at
+                    recorded_at,
                 )
 
                 add_relationship(
@@ -426,7 +460,7 @@ def normalize_data(data):
                     asn,
                     "IP Metadata",
                     "IP to ASN lookup",
-                    recorded_at
+                    recorded_at,
                 )
 
         # -----------------------------------------------------
@@ -450,7 +484,7 @@ def normalize_data(data):
                     organization,
                     "IP Metadata",
                     "IP organization lookup",
-                    recorded_at
+                    recorded_at,
                 )
 
                 add_relationship(
@@ -463,19 +497,234 @@ def normalize_data(data):
                     organization,
                     "IP Metadata",
                     "IP organization lookup",
-                    recorded_at
+                    recorded_at,
                 )
+
+    # =========================================================
+    # PORT SCAN RESULTS
+    # =========================================================
+
+    port_scan_data = data.get(
+        "port_scan",
+        {},
+    )
+
+    if (
+        isinstance(port_scan_data, dict)
+        and not port_scan_data.get("error")
+    ):
+
+        for ip_result in port_scan_data.get(
+            "results",
+            [],
+        ):
+
+            if not isinstance(ip_result, dict):
+                continue
+
+            ip = ip_result.get("ip")
+
+            if not ip:
+                continue
+
+            ip = str(ip).strip()
+
+            if not ip:
+                continue
+
+            # -------------------------------------------------
+            # Ensure IP entity exists
+            # -------------------------------------------------
+
+            add_entity(
+                entities,
+                entity_index,
+                "IPAddress",
+                ip,
+                "Port Scanner",
+                "Port scanning",
+                recorded_at,
+            )
+
+            # -------------------------------------------------
+            # Open Ports
+            # -------------------------------------------------
+
+            for port_info in ip_result.get(
+                "open_ports",
+                [],
+            ):
+
+                if not isinstance(port_info, dict):
+                    continue
+
+                port = port_info.get("port")
+
+                if port is None:
+                    continue
+
+                protocol = (
+                    port_info.get(
+                        "protocol",
+                        "tcp",
+                    )
+                    or "tcp"
+                )
+
+                protocol = str(
+                    protocol
+                ).strip().lower()
+
+                service = (
+                    port_info.get(
+                        "service",
+                        "unknown",
+                    )
+                    or "unknown"
+                )
+
+                service = str(
+                    service
+                ).strip()
+
+                banner = port_info.get(
+                    "banner"
+                )
+
+                if banner is not None:
+                    banner = str(
+                        banner
+                    ).strip()
+
+                # -------------------------------------------------
+                # Port value
+                # -------------------------------------------------
+
+                port_value = (
+                    f"{port}/{protocol}"
+                )
+
+                # -------------------------------------------------
+                # Port entity
+                #
+                # IMPORTANT:
+                # Store service information as properties so
+                # Neo4j/frontend can display:
+                #
+                # 22/tcp → SSH
+                # 80/tcp → HTTP
+                # -------------------------------------------------
+
+                add_entity(
+                    entities,
+                    entity_index,
+                    "Port",
+                    port_value,
+                    "Port Scanner",
+                    f"Port scanning (service: {service})",
+                    recorded_at,
+                    properties={
+                        "port": int(port)
+                        if str(port).isdigit()
+                        else str(port),
+                        "protocol": protocol,
+                        "service": service,
+                        "state": "open",
+                    },
+                )
+
+                # -------------------------------------------------
+                # IP → HAS_OPEN_PORT → Port
+                # -------------------------------------------------
+
+                add_relationship(
+                    relationships,
+                    relationship_index,
+                    "IPAddress",
+                    ip,
+                    "HAS_OPEN_PORT",
+                    "Port",
+                    port_value,
+                    "Port Scanner",
+                    f"Port {port}/{protocol} is open",
+                    recorded_at,
+                    properties={
+                        "service": service,
+                        "protocol": protocol,
+                    },
+                )
+
+                # -------------------------------------------------
+                # SERVICE BANNER
+                # -------------------------------------------------
+
+                if banner:
+
+                    # Deterministic hash.
+                    #
+                    # SHA-256 is preferable to MD5 here because
+                    # this is simply being used as an identifier.
+                    banner_hash = hashlib.sha256(
+                        banner.encode("utf-8")
+                    ).hexdigest()[:16]
+
+                    banner_entity = (
+                        f"banner_{banner_hash}"
+                    )
+
+                    add_entity(
+                        entities,
+                        entity_index,
+                        "ServiceBanner",
+                        banner_entity,
+                        "Port Scanner",
+                        f"Banner for {port}/{protocol}",
+                        recorded_at,
+                        properties={
+                            "banner": banner,
+                            "service": service,
+                            "port": int(port)
+                            if str(port).isdigit()
+                            else str(port),
+                            "protocol": protocol,
+                        },
+                    )
+
+                    # -------------------------------------------------
+                    # Port → HAS_BANNER → ServiceBanner
+                    # -------------------------------------------------
+
+                    add_relationship(
+                        relationships,
+                        relationship_index,
+                        "Port",
+                        port_value,
+                        "HAS_BANNER",
+                        "ServiceBanner",
+                        banner_entity,
+                        "Port Scanner",
+                        "Service banner captured",
+                        recorded_at,
+                    )
 
     # =========================================================
     # CERTIFICATES
     # =========================================================
 
-    for certificate in data.get("certificates", []):
+    for certificate in data.get(
+        "certificates",
+        [],
+    ):
 
-        if not isinstance(certificate, dict):
+        if not isinstance(
+            certificate,
+            dict,
+        ):
             continue
 
-        certificate_id = certificate.get("id")
+        certificate_id = certificate.get(
+            "id"
+        )
 
         if not certificate_id:
             continue
@@ -484,10 +733,6 @@ def normalize_data(data):
             certificate_id
         ).strip()
 
-        # -----------------------------------------------------
-        # Certificate Entity
-        # -----------------------------------------------------
-
         add_entity(
             entities,
             entity_index,
@@ -495,12 +740,8 @@ def normalize_data(data):
             certificate_id,
             "Certificate Transparency",
             "Cert Spotter certificate lookup",
-            recorded_at
+            recorded_at,
         )
-
-        # -----------------------------------------------------
-        # Domain → Certificate
-        # -----------------------------------------------------
 
         add_relationship(
             relationships,
@@ -512,35 +753,21 @@ def normalize_data(data):
             certificate_id,
             "Certificate Transparency",
             "Cert Spotter certificate lookup",
-            recorded_at
+            recorded_at,
         )
 
     # =========================================================
     # VIRUSTOTAL INTELLIGENCE
     # =========================================================
-    #
-    # VirusTotal observations are intentionally kept as
-    # structured attributes rather than creating nodes for
-    # every numeric/statistical field.
-    #
-    # We do NOT create:
-    #
-    # Domain → HAS_REPUTATION → 0
-    # Domain → HAS_HARMLESS_COUNT → 57
-    # Domain → HAS_UNDETECTED_COUNT → 34
-    #
-    # These are properties of a VirusTotal observation.
-    #
-    # =========================================================
 
     virustotal_data = data.get(
         "virustotal",
-        {}
+        {},
     )
 
     if not isinstance(
         virustotal_data,
-        dict
+        dict,
     ):
         virustotal_data = {}
 
@@ -569,63 +796,54 @@ def normalize_data(data):
         # Analysis Statistics
         # -----------------------------------------------------
 
-        analysis_stats = (
-            virustotal_data.get(
-                "last_analysis_stats",
-                {}
-            )
+        analysis_stats = virustotal_data.get(
+            "last_analysis_stats",
+            {},
         )
 
         if not isinstance(
             analysis_stats,
-            dict
+            dict,
         ):
             analysis_stats = {}
 
         normalized_virustotal[
             "last_analysis_stats"
         ] = {
-
             "malicious": analysis_stats.get(
                 "malicious",
-                0
+                0,
             ),
-
             "suspicious": analysis_stats.get(
                 "suspicious",
-                0
+                0,
             ),
-
             "harmless": analysis_stats.get(
                 "harmless",
-                0
+                0,
             ),
-
             "undetected": analysis_stats.get(
                 "undetected",
-                0
+                0,
             ),
-
             "timeout": analysis_stats.get(
                 "timeout",
-                0
-            )
+                0,
+            ),
         }
 
         # -----------------------------------------------------
         # Categories
         # -----------------------------------------------------
 
-        categories = (
-            virustotal_data.get(
-                "categories",
-                {}
-            )
+        categories = virustotal_data.get(
+            "categories",
+            {},
         )
 
         if not isinstance(
             categories,
-            dict
+            dict,
         ):
             categories = {}
 
@@ -667,16 +885,14 @@ def normalize_data(data):
         # DNS Records
         # -----------------------------------------------------
 
-        dns_records = (
-            virustotal_data.get(
-                "last_dns_records",
-                []
-            )
+        dns_records = virustotal_data.get(
+            "last_dns_records",
+            [],
         )
 
         if not isinstance(
             dns_records,
-            list
+            list,
         ):
             dns_records = []
 
@@ -688,16 +904,14 @@ def normalize_data(data):
         # Popularity Ranks
         # -----------------------------------------------------
 
-        popularity_ranks = (
-            virustotal_data.get(
-                "popularity_ranks",
-                {}
-            )
+        popularity_ranks = virustotal_data.get(
+            "popularity_ranks",
+            {},
         )
 
         if not isinstance(
             popularity_ranks,
-            dict
+            dict,
         ):
             popularity_ranks = {}
 
@@ -726,16 +940,11 @@ def normalize_data(data):
     # =========================================================
 
     return {
-
         "domain": domain,
-
         "normalized_at": recorded_at,
-
         "entities": entities,
-
         "relationships": relationships,
-
-        "virustotal": normalized_virustotal
+        "virustotal": normalized_virustotal,
     }
 
 
@@ -745,18 +954,20 @@ def normalize_data(data):
 
 def normalize_file(
     input_path,
-    output_path
+    output_path,
 ):
 
     with open(
         input_path,
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as file:
 
         data = json.load(file)
 
-    normalized_data = normalize_data(data)
+    normalized_data = normalize_data(
+        data
+    )
 
     output_directory = os.path.dirname(
         output_path
@@ -766,20 +977,20 @@ def normalize_file(
 
         os.makedirs(
             output_directory,
-            exist_ok=True
+            exist_ok=True,
         )
 
     with open(
         output_path,
         "w",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as file:
 
         json.dump(
             normalized_data,
             file,
             indent=2,
-            ensure_ascii=False
+            ensure_ascii=False,
         )
 
     return normalized_data
@@ -819,7 +1030,7 @@ if __name__ == "__main__":
 
         normalize_file(
             input_path,
-            output_path
+            output_path,
         )
 
         print(

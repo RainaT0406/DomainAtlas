@@ -1,4 +1,8 @@
-import { useRef, useState, useEffect } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   Activity,
@@ -13,7 +17,6 @@ import {
   ChevronRight,
   Download,
   Radar,
-  Fingerprint,
   Layers3,
   CircleDot,
   Shield,
@@ -26,12 +29,30 @@ import {
   Map,
   Target,
   Square,
+  Plug,
 } from "lucide-react";
 
-import jsPDF from "jspdf";
 import GraphView from "./GraphView";
 
+import PipelineStep from "./components/PipelineStep";
+import PortScanResults from "./components/PortScanResults";
+import StatCard from "./components/StatCard";
+import InfoRow from "./components/InfoRow";
+import PatternCard from "./components/PatternCard";
+
+import {
+  normalizeAnalysisData,
+} from "./utils/analysisData";
+
+import {
+  downloadSubdomainsPDF,
+  downloadAIReportPDF,
+} from "./utils/pdfExport";
+
 import "./App.css";
+
+const API_BASE =
+  "http://127.0.0.1:8000";
 
 function App() {
   // ============================================================
@@ -40,45 +61,83 @@ function App() {
 
   const [domain, setDomain] = useState("");
   const [analysis, setAnalysis] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [progress, setProgress] = useState([]);
-  const [currentProgress, setCurrentProgress] = useState(0);
-  const [showIntro, setShowIntro] = useState(true);
-  const [stopRequested, setStopRequested] = useState(false);
-  const [abortController, setAbortController] = useState(null);
-  const [eventSource, setEventSource] = useState(null);
-  const [scanId, setScanId] = useState(null);
-  const [activeNav, setActiveNav] = useState("overview");
-  const [isStopped, setIsStopped] = useState(false);
-  const [renderError, setRenderError] = useState(null);
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [error, setError] =
+    useState("");
+
+  const [progress, setProgress] =
+    useState([]);
+
+  const [currentProgress, setCurrentProgress] =
+    useState(0);
+
+  const [showIntro, setShowIntro] =
+    useState(true);
+
+  const [stopRequested, setStopRequested] =
+    useState(false);
+
+  const [scanId, setScanId] =
+    useState(null);
+
+  const [activeNav, setActiveNav] =
+    useState("overview");
 
   // ============================================================
   // SCAN LIFECYCLE REFS
   // ============================================================
 
-  const scanGenerationRef = useRef(0);
-  const eventSourceRef = useRef(null);
-  const abortControllerRef = useRef(null);
-  const stopRequestedRef = useRef(false);
+  const scanGenerationRef =
+    useRef(0);
+
+  const eventSourceRef =
+    useRef(null);
+
+  const abortControllerRef =
+    useRef(null);
+
+  const stopRequestedRef =
+    useRef(false);
 
   // ============================================================
-  // SECTION REFERENCES
+  // SECTION REFS
   // ============================================================
 
-  const dashboardRef = useRef(null);
-  const infrastructureRef = useRef(null);
-  const graphRef = useRef(null);
-  const subdomainsRef = useRef(null);
-  const certificatesRef = useRef(null);
-  const aiReportRef = useRef(null);
-  const heroRef = useRef(null);
+  const dashboardRef =
+    useRef(null);
+
+  const infrastructureRef =
+    useRef(null);
+
+  const graphRef =
+    useRef(null);
+
+  const subdomainsRef =
+    useRef(null);
+
+  const certificatesRef =
+    useRef(null);
+
+  const portsRef =
+    useRef(null);
+
+  const virustotalRef =
+    useRef(null);
+
+  const aiReportRef =
+    useRef(null);
 
   // ============================================================
-  // SCROLL NAVIGATION WITH HIGHLIGHTING
+  // NAVIGATION
   // ============================================================
 
-  const scrollToSection = (ref, sectionName) => {
+  const scrollToSection = (
+    ref,
+    sectionName
+  ) => {
     if (!ref.current) return;
 
     setActiveNav(sectionName);
@@ -90,916 +149,961 @@ function App() {
   };
 
   // ============================================================
-  // DETECT SCROLL POSITION FOR HIGHLIGHTING
+  // SCROLL TRACKING
   // ============================================================
 
   useEffect(() => {
+    if (!analysis && !loading) {
+      return undefined;
+    }
+
     const handleScroll = () => {
-      const scrollY = window.scrollY + 120;
+      const scrollY =
+        window.scrollY + 120;
 
       const sections = [
-        { ref: dashboardRef, name: "overview" },
-        { ref: infrastructureRef, name: "infrastructure" },
-        { ref: graphRef, name: "graph" },
-        { ref: subdomainsRef, name: "subdomains" },
-        { ref: certificatesRef, name: "certificates" },
-        { ref: aiReportRef, name: "ai" },
+        {
+          ref: dashboardRef,
+          name: "overview",
+        },
+        {
+          ref: infrastructureRef,
+          name: "infrastructure",
+        },
+        {
+          ref: graphRef,
+          name: "graph",
+        },
+        {
+          ref: subdomainsRef,
+          name: "subdomains",
+        },
+        {
+          ref: certificatesRef,
+          name: "certificates",
+        },
+        {
+          ref: portsRef,
+          name: "ports",
+        },
+        {
+          ref: virustotalRef,
+          name: "virustotal",
+        },
+        {
+          ref: aiReportRef,
+          name: "ai",
+        },
       ];
 
-      let activeSection = "overview";
+      let activeSection =
+        "overview";
 
       for (const section of sections) {
-        if (section.ref.current) {
-          const rect = section.ref.current.getBoundingClientRect();
-          const elementTop = rect.top + window.scrollY;
-          const elementBottom = elementTop + rect.height;
+        if (!section.ref.current) {
+          continue;
+        }
 
-          if (scrollY >= elementTop - 50 && scrollY < elementBottom - 50) {
-            activeSection = section.name;
-            break;
-          }
+        const rect =
+          section.ref.current.getBoundingClientRect();
+
+        const top =
+          rect.top + window.scrollY;
+
+        const bottom =
+          top + rect.height;
+
+        if (
+          scrollY >= top - 50 &&
+          scrollY < bottom - 50
+        ) {
+          activeSection =
+            section.name;
+
+          break;
         }
       }
 
       setActiveNav(activeSection);
     };
 
-    if (analysis || loading) {
-      window.addEventListener("scroll", handleScroll);
-      setTimeout(handleScroll, 100);
-    } else {
-      window.removeEventListener("scroll", handleScroll);
-    }
+    window.addEventListener(
+      "scroll",
+      handleScroll,
+      { passive: true }
+    );
 
-    return () => window.removeEventListener("scroll", handleScroll);
+    const timeout =
+      window.setTimeout(
+        handleScroll,
+        100
+      );
+
+    return () => {
+      window.removeEventListener(
+        "scroll",
+        handleScroll
+      );
+
+      window.clearTimeout(timeout);
+    };
   }, [analysis, loading]);
 
   // ============================================================
-  // CLEAN UP ACTIVE SCAN RESOURCES
+  // CLEANUP
   // ============================================================
 
   const cleanupScanResources = () => {
-    const activeEventSource = eventSourceRef.current;
+    const es =
+      eventSourceRef.current;
 
-    if (activeEventSource) {
+    if (es) {
       try {
-        activeEventSource.close();
-      } catch (e) {
-        console.warn("[!] Error closing EventSource:", e);
+        es.close();
+      } catch (err) {
+        console.warn(
+          "[!] EventSource cleanup failed:",
+          err
+        );
       }
     }
 
-    eventSourceRef.current = null;
-    setEventSource(null);
+    eventSourceRef.current =
+      null;
 
-    const activeController = abortControllerRef.current;
+    const controller =
+      abortControllerRef.current;
 
-    if (activeController) {
+    if (controller) {
       try {
-        activeController.abort();
-      } catch (e) {
-        console.warn("[!] Error aborting fetch:", e);
+        controller.abort();
+      } catch (err) {
+        console.warn(
+          "[!] Abort cleanup failed:",
+          err
+        );
       }
     }
 
-    abortControllerRef.current = null;
-    setAbortController(null);
+    abortControllerRef.current =
+      null;
   };
 
   // ============================================================
-  // STOP FUNCTION
+  // COMPONENT UNMOUNT CLEANUP
+  // ============================================================
+
+  useEffect(() => {
+    return () => {
+      scanGenerationRef.current += 1;
+
+      stopRequestedRef.current =
+        true;
+
+      cleanupScanResources();
+    };
+  }, []);
+
+  // ============================================================
+  // STOP SCAN
   // ============================================================
 
   const stopAnalysis = async () => {
-    console.log("[*] Stop requested");
-
-    stopRequestedRef.current = true;
-
-    const stoppedGeneration = scanGenerationRef.current;
-
-    setIsStopped(true);
-    setStopRequested(true);
-
-    scanGenerationRef.current += 1;
-
-    const activeEventSource = eventSourceRef.current;
-
-    if (activeEventSource) {
-      console.log("[*] Closing EventSource");
-      try {
-        activeEventSource.close();
-      } catch (e) {
-        console.warn("[!] Failed to close EventSource:", e);
-      }
+    if (!loading) {
+      return;
     }
 
-    eventSourceRef.current = null;
-    setEventSource(null);
+    console.log(
+      "[*] User requested scan stop"
+    );
 
-    const activeController = abortControllerRef.current;
-
-    if (activeController) {
-      console.log("[*] Aborting fetch request");
-
-      try {
-        activeController.abort();
-      } catch (e) {
-        console.warn("[!] Failed to abort fetch:", e);
-      }
-    }
-
-    abortControllerRef.current = null;
-    setAbortController(null);
-
-    const targetDomain = domain.trim().toLowerCase().replace(/\.$/, "");
-    const currentScanId = scanId;
-
-    setLoading(false);
-    setProgress([]);
-    setCurrentProgress(0);
-    setShowIntro(true);
-    setAnalysis(null);
-    setScanId(null);
-    setActiveNav("overview");
-    setError("Scan cancelled by user.");
-
-    try {
-      const payload = {};
-
-      if (targetDomain) payload.domain = targetDomain;
-      if (currentScanId) payload.scan_id = currentScanId;
-
-      console.log("[*] Sending stop payload:", payload);
-
-      const response = await fetch("http://127.0.0.1:8000/analyze/stop", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await response.json();
-      console.log("[*] Stop response:", data);
-    } catch (e) {
-      console.warn("[!] Failed to send stop signal to backend:", e);
-    }
-
-    console.log("[*] Scan stopped:", stoppedGeneration);
-  };
-
-  // ============================================================
-  // ANALYZE DOMAIN
-  // ============================================================
-
-  const analyzeDomain = async () => {
     const targetDomain = domain
       .trim()
       .toLowerCase()
       .replace(/\.$/, "");
 
-    if (!targetDomain) {
-      setError("Please enter a domain.");
-      return;
-    }
+    const currentScanId =
+      scanId;
 
-    console.log("[*] Starting new scan for:", targetDomain);
+    // IMPORTANT:
+    // Mark the scan stale BEFORE aborting anything.
+    // This prevents late SSE/fetch events from
+    // modifying state after cancellation.
+    stopRequestedRef.current =
+      true;
 
-    setRenderError(null);
+    scanGenerationRef.current += 1;
 
-    const scanGeneration = scanGenerationRef.current + 1;
-    scanGenerationRef.current = scanGeneration;
+    cleanupScanResources();
 
-    const previousEventSource = eventSourceRef.current;
+    setLoading(false);
+    setStopRequested(true);
 
-    if (previousEventSource) {
-      console.log("[*] Closing previous EventSource");
-
-      try {
-        previousEventSource.close();
-      } catch (e) {
-        console.warn("[!] Failed to close previous EventSource:", e);
-      }
-
-      eventSourceRef.current = null;
-      setEventSource(null);
-    }
-
-    const previousController = abortControllerRef.current;
-
-    if (previousController) {
-      console.log("[*] Aborting previous fetch");
-
-      try {
-        previousController.abort();
-      } catch (e) {
-        console.warn("[!] Failed to abort previous fetch:", e);
-      }
-
-      abortControllerRef.current = null;
-      setAbortController(null);
-    }
-
-    stopRequestedRef.current = false;
-
-    setIsStopped(false);
-    setStopRequested(false);
-    setLoading(true);
-    setError("");
-    setAnalysis(null);
     setProgress([]);
     setCurrentProgress(0);
-    setShowIntro(false);
+
+    setAnalysis(null);
     setScanId(null);
+
+    setShowIntro(true);
     setActiveNav("overview");
 
-    const controller = new AbortController();
-
-    abortControllerRef.current = controller;
-    setAbortController(controller);
-
-    const es = new EventSource(
-      "http://127.0.0.1:8000/analyze/progress"
+    setError(
+      "Scan cancelled by user."
     );
 
-    eventSourceRef.current = es;
-    setEventSource(es);
+    const payload = {};
 
-    let isClosed = false;
+    if (targetDomain) {
+      payload.domain =
+        targetDomain;
+    }
 
-    const isCurrentScan = () => {
-      return (
-        scanGenerationRef.current === scanGeneration &&
-        !controller.signal.aborted
-      );
-    };
-
-    es.onopen = () => {
-      if (!isCurrentScan()) {
-        es.close();
-        return;
-      }
-
-      console.log("[*] EventSource connected for scan:", scanGeneration);
-    };
-
-    es.onmessage = (event) => {
-      if (!isCurrentScan()) {
-        console.log(
-          "[*] Ignoring stale progress event from scan:",
-          scanGeneration
-        );
-
-        if (!isClosed) {
-          es.close();
-          isClosed = true;
-        }
-
-        return;
-      }
-
-      if (stopRequestedRef.current) {
-        if (!isClosed) {
-          console.log("[*] Closing EventSource because current scan was stopped");
-          es.close();
-          isClosed = true;
-        }
-
-        return;
-      }
-
-      try {
-        const update = JSON.parse(event.data);
-
-        console.log(
-          "[*] Progress update:",
-          update.step,
-          update.status,
-          update.progress
-        );
-
-        if (update.status === "cancelled") {
-          console.log(
-            "[*] Ignoring backend cancelled event"
-          );
-          return;
-        }
-
-        setProgress((prev) => {
-          if (scanGenerationRef.current !== scanGeneration) {
-            return prev;
-          }
-
-          const existing = prev.findIndex(
-            (p) => p.step === update.step
-          );
-
-          if (existing >= 0) {
-            const updated = [...prev];
-            updated[existing] = update;
-            return updated;
-          }
-
-          return [...prev, update];
-        });
-
-        if (scanGenerationRef.current === scanGeneration) {
-          setCurrentProgress(update.progress || 0);
-        }
-      } catch (e) {
-        console.error("Error parsing progress update:", e);
-      }
-    };
-
-    es.onerror = (event) => {
-      if (scanGenerationRef.current !== scanGeneration) {
-        if (!isClosed) {
-          es.close();
-          isClosed = true;
-        }
-
-        return;
-      }
-
-      console.log("[*] EventSource error:", event);
-
-      if (
-        !stopRequestedRef.current &&
-        !controller.signal.aborted
-      ) {
-        console.warn("EventSource connection closed unexpectedly.");
-      }
-
-      if (!isClosed) {
-        es.close();
-        isClosed = true;
-      }
-
-      if (eventSourceRef.current === es) {
-        eventSourceRef.current = null;
-        setEventSource(null);
-      }
-    };
+    if (currentScanId) {
+      payload.scan_id =
+        currentScanId;
+    }
 
     try {
-      const response = await fetch(
-        "http://127.0.0.1:8000/analyze",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            domain: targetDomain,
-          }),
-          signal: controller.signal,
-        }
+      console.log(
+        "[*] Sending backend stop request:",
+        payload
       );
 
-      if (
-        controller.signal.aborted ||
-        scanGenerationRef.current !== scanGeneration ||
-        stopRequestedRef.current
-      ) {
+      const response =
+        await fetch(
+          `${API_BASE}/analyze/stop`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify(
+              payload
+            ),
+          }
+        );
+
+      if (!response.ok) {
+        console.warn(
+          "[!] Backend stop request returned:",
+          response.status
+        );
+
         return;
       }
 
-      let data;
+      const data =
+        await response.json();
+
+      console.log(
+        "[*] Backend stop response:",
+        data
+      );
+    } catch (err) {
+      console.warn(
+        "[!] Could not notify backend about stop:",
+        err
+      );
+    }
+  };
+
+  // ============================================================
+  // PROGRESS UPDATE
+  // ============================================================
+
+  const processProgressUpdate = (
+    update,
+    generation
+  ) => {
+    if (
+      scanGenerationRef.current !==
+      generation
+    ) {
+      return false;
+    }
+
+    if (
+      stopRequestedRef.current
+    ) {
+      return false;
+    }
+
+    if (
+      !update ||
+      typeof update !== "object"
+    ) {
+      return false;
+    }
+
+    if (
+      update.status ===
+      "cancelled"
+    ) {
+      console.log(
+        "[*] Ignoring backend cancellation event"
+      );
+
+      return false;
+    }
+
+    setProgress((previous) => {
+      const existingIndex =
+        previous.findIndex(
+          (item) =>
+            item.step ===
+            update.step
+        );
+
+      if (
+        existingIndex === -1
+      ) {
+        return [
+          ...previous,
+          update,
+        ];
+      }
+
+      const next = [
+        ...previous,
+      ];
+
+      next[existingIndex] =
+        update;
+
+      return next;
+    });
+
+    if (
+      typeof update.progress ===
+      "number"
+    ) {
+      setCurrentProgress(
+        Math.max(
+          0,
+          Math.min(
+            100,
+            update.progress
+          )
+        )
+      );
+    }
+
+    return true;
+  };
+
+  // ============================================================
+  // SUBDOMAIN DISCOVERY STATUS
+  // ============================================================
+
+  const getCombinedDiscoveryStatus =
+    () => {
+      const discoverySteps =
+        progress.filter(
+          (item) =>
+            item.step ===
+              "subfinder" ||
+            item.step ===
+              "amass"
+        );
+
+      if (
+        discoverySteps.some(
+          (item) =>
+            item.status ===
+            "running"
+        )
+      ) {
+        return "running";
+      }
+
+      if (
+        discoverySteps.length > 0 &&
+        discoverySteps.every(
+          (item) =>
+            item.status ===
+            "completed"
+        )
+      ) {
+        return "completed";
+      }
+
+      if (
+        discoverySteps.some(
+          (item) =>
+            item.status ===
+            "cancelled"
+        )
+      ) {
+        return "cancelled";
+      }
+
+      return undefined;
+    };
+
+  // ============================================================
+  // ANALYZE DOMAIN
+  // ============================================================
+
+  const analyzeDomain =
+    async () => {
+      const targetDomain =
+        domain
+          .trim()
+          .toLowerCase()
+          .replace(/\.$/, "");
+
+      if (!targetDomain) {
+        setError(
+          "Please enter a domain."
+        );
+
+        return;
+      }
+
+      console.log(
+        "[*] Starting scan:",
+        targetDomain
+      );
+
+      // --------------------------------------------------------
+      // Invalidate previous scan
+      // --------------------------------------------------------
+
+      scanGenerationRef.current += 1;
+
+      const generation =
+        scanGenerationRef.current;
+
+      stopRequestedRef.current =
+        false;
+
+      cleanupScanResources();
+
+      // --------------------------------------------------------
+      // Reset UI
+      // --------------------------------------------------------
+
+      setLoading(true);
+      setError("");
+      setAnalysis(null);
+
+      setProgress([]);
+      setCurrentProgress(0);
+
+      setShowIntro(false);
+      setStopRequested(false);
+
+      setScanId(null);
+      setActiveNav("overview");
+
+      // --------------------------------------------------------
+      // New AbortController
+      // --------------------------------------------------------
+
+      const controller =
+        new AbortController();
+
+      abortControllerRef.current =
+        controller;
+
+      // --------------------------------------------------------
+      // Create SSE connection
+      // --------------------------------------------------------
+
+      const eventSource =
+        new EventSource(
+          `${API_BASE}/analyze/progress`
+        );
+
+      eventSourceRef.current =
+        eventSource;
+
+      let eventSourceClosed =
+        false;
+
+      const isCurrentScan =
+        () =>
+          scanGenerationRef.current ===
+            generation &&
+          !controller.signal
+            .aborted &&
+          !stopRequestedRef.current;
+
+      const closeEventSource =
+        () => {
+          if (
+            eventSourceClosed
+          ) {
+            return;
+          }
+
+          eventSourceClosed =
+            true;
+
+          try {
+            eventSource.close();
+          } catch (err) {
+            console.warn(
+              "[!] EventSource close failed:",
+              err
+            );
+          }
+
+          if (
+            eventSourceRef.current ===
+            eventSource
+          ) {
+            eventSourceRef.current =
+              null;
+          }
+        };
+
+      eventSource.onopen =
+        () => {
+          if (
+            !isCurrentScan()
+          ) {
+            closeEventSource();
+            return;
+          }
+
+          console.log(
+            "[*] Progress SSE connected"
+          );
+        };
+
+      eventSource.onmessage =
+        (event) => {
+          if (
+            !isCurrentScan()
+          ) {
+            closeEventSource();
+            return;
+          }
+
+          try {
+            const update =
+              JSON.parse(
+                event.data
+              );
+
+            console.log(
+              "[*] Progress:",
+              update.step,
+              update.status,
+              update.progress
+            );
+
+            processProgressUpdate(
+              update,
+              generation
+            );
+          } catch (err) {
+            console.error(
+              "[!] Invalid SSE message:",
+              err
+            );
+          }
+        };
+
+      eventSource.onerror =
+        () => {
+          if (
+            !isCurrentScan()
+          ) {
+            closeEventSource();
+            return;
+          }
+
+          console.warn(
+            "[!] Progress SSE connection closed"
+          );
+
+          closeEventSource();
+        };
+
+      // --------------------------------------------------------
+      // Start backend analysis
+      // --------------------------------------------------------
 
       try {
-        data = await response.json();
-      } catch {
+        const response =
+          await fetch(
+            `${API_BASE}/analyze`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/json",
+                Accept:
+                  "application/json",
+              },
+              body: JSON.stringify({
+                domain:
+                  targetDomain,
+              }),
+              signal:
+                controller.signal,
+            }
+          );
+
+        // ------------------------------------------------------
+        // Ignore stale result
+        // ------------------------------------------------------
+
         if (
-          controller.signal.aborted ||
-          scanGenerationRef.current !== scanGeneration
+          !isCurrentScan()
         ) {
           return;
         }
 
-        throw new Error(
-          "The API returned an invalid response."
-        );
-      }
+        let data;
 
-      if (
-        controller.signal.aborted ||
-        scanGenerationRef.current !== scanGeneration ||
-        stopRequestedRef.current
-      ) {
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(
-          data?.detail || "Domain analysis failed."
-        );
-      }
-
-      if (!data?.success) {
-        throw new Error(
-          "Domain analysis was not successful."
-        );
-      }
-
-      if (scanGenerationRef.current !== scanGeneration) {
-        return;
-      }
-
-      console.log("[*] Analysis data received:", data);
-
-      // Ensure data has all required fields with fallbacks
-      const safeData = {
-        ...data,
-        infrastructure: data.infrastructure || { subdomains: [], ip_addresses: [], asns: [], organizations: [], certificates: [] },
-        virustotal: data.virustotal || {},
-        statistics: data.statistics || {},
-        subdomain_patterns: data.subdomain_patterns || {},
-        observations: data.observations || [],
-        provenance: data.provenance || [],
-        ai_report: data.ai_report || "",
-        graph: data.graph || { nodes: [], edges: [], provenance: [] }
-      };
-
-      setScanId(safeData.scan_id || null);
-      setAnalysis(safeData);
-      setLoading(false);
-      setIsStopped(false);
-      setStopRequested(false);
-      stopRequestedRef.current = false;
-
-      setTimeout(() => {
-        if (
-          scanGenerationRef.current === scanGeneration &&
-          dashboardRef.current
-        ) {
-          dashboardRef.current.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      }, 300);
-    } catch (err) {
-      if (err?.name === "AbortError") {
-        console.log("[*] Fetch aborted");
-        return;
-      }
-
-      if (scanGenerationRef.current !== scanGeneration) {
-        console.log(
-          "[*] Ignoring error from stale scan:",
-          scanGeneration
-        );
-        return;
-      }
-
-      if (stopRequestedRef.current) {
-        return;
-      }
-
-      console.error("Domain analysis error:", err);
-
-      setLoading(false);
-      setError(
-        err?.message ||
-        "Unable to connect to the DomainAtlas API."
-      );
-    } finally {
-      if (scanGenerationRef.current !== scanGeneration) {
-        return;
-      }
-
-      if (!isClosed) {
         try {
-          es.close();
-        } catch (e) {
-          console.warn("[!] Failed to close EventSource:", e);
+          data =
+            await response.json();
+        } catch {
+          throw new Error(
+            "The API returned an invalid response."
+          );
         }
 
-        isClosed = true;
-      }
+        if (
+          !response.ok
+        ) {
+          throw new Error(
+            data?.detail ||
+              "Domain analysis failed."
+          );
+        }
 
-      if (eventSourceRef.current === es) {
-        eventSourceRef.current = null;
-        setEventSource(null);
-      }
+        if (
+          !data?.success
+        ) {
+          throw new Error(
+            "Domain analysis was not successful."
+          );
+        }
 
-      if (abortControllerRef.current === controller) {
-        abortControllerRef.current = null;
-        setAbortController(null);
+        if (
+          !isCurrentScan()
+        ) {
+          return;
+        }
+
+        console.log(
+          "[*] Analysis completed:",
+          data
+        );
+
+        // ------------------------------------------------------
+        // Normalize data once
+        // ------------------------------------------------------
+
+        const safeData =
+          normalizeAnalysisData(
+            data
+          );
+
+        setScanId(
+          safeData.scan_id ||
+            null
+        );
+
+        setAnalysis(
+          safeData
+        );
+
+        setCurrentProgress(
+          100
+        );
+
+        setLoading(false);
+        setStopRequested(
+          false
+        );
+
+        stopRequestedRef.current =
+          false;
+
+        // ------------------------------------------------------
+        // Close SSE after successful completion
+        // ------------------------------------------------------
+
+        closeEventSource();
+
+        setTimeout(() => {
+          if (
+            scanGenerationRef.current ===
+              generation &&
+            dashboardRef.current
+          ) {
+            dashboardRef.current.scrollIntoView(
+              {
+                behavior:
+                  "smooth",
+                block: "start",
+              }
+            );
+          }
+        }, 300);
+      } catch (err) {
+        if (
+          err?.name ===
+          "AbortError"
+        ) {
+          console.log(
+            "[*] Analysis fetch aborted"
+          );
+
+          return;
+        }
+
+        if (
+          !isCurrentScan()
+        ) {
+          console.log(
+            "[*] Ignoring stale scan error"
+          );
+
+          return;
+        }
+
+        console.error(
+          "[!] Domain analysis error:",
+          err
+        );
+
+        setLoading(false);
+
+        setError(
+          err?.message ||
+            "Unable to connect to the DomainAtlas API."
+        );
+
+        closeEventSource();
+      } finally {
+        if (
+          scanGenerationRef.current !==
+          generation
+        ) {
+          return;
+        }
+
+        closeEventSource();
+
+        if (
+          abortControllerRef.current ===
+          controller
+        ) {
+          abortControllerRef.current =
+            null;
+        }
       }
-    }
-  };
+    };
 
   // ============================================================
   // ENTER KEY
   // ============================================================
 
-  const handleKeyDown = (event) => {
-    if (event.key === "Enter" && !loading) {
-      analyzeDomain();
-    }
-  };
+  const handleKeyDown =
+    (event) => {
+      if (
+        event.key === "Enter" &&
+        !loading
+      ) {
+        analyzeDomain();
+      }
+    };
 
   // ============================================================
-  // SAFE DATA EXTRACTION WITH ERROR HANDLING
+  // SAFE DATA
   // ============================================================
 
-  const statistics = analysis?.statistics || {};
+  const statistics =
+    analysis?.statistics || {};
 
-  const infrastructure = analysis?.infrastructure || {};
+  const infrastructure =
+    analysis?.infrastructure || {};
 
-  const ipVersion = analysis?.ip_version_summary || {};
+  const ipVersion =
+    analysis?.ip_version_summary ||
+    {};
 
-  const patterns = analysis?.subdomain_patterns || {};
+  const patterns =
+    analysis?.subdomain_patterns ||
+    {};
 
-  const observations = Array.isArray(analysis?.observations)
-    ? analysis.observations
-    : [];
+  const observations =
+    Array.isArray(
+      analysis?.observations
+    )
+      ? analysis.observations
+      : [];
 
-  const provenance = Array.isArray(analysis?.provenance)
-    ? analysis.provenance
-    : [];
+  const provenance =
+    Array.isArray(
+      analysis?.provenance
+    )
+      ? analysis.provenance
+      : [];
 
-  const aiReport = typeof analysis?.ai_report === "string"
-    ? analysis.ai_report
-    : "";
+  const aiReport =
+    typeof analysis?.ai_report ===
+    "string"
+      ? analysis.ai_report
+      : "";
 
-  const graph = analysis?.graph || {
-    nodes: [],
-    edges: [],
-    provenance: []
-  };
+  const graph =
+    analysis?.graph || {
+      nodes: [],
+      edges: [],
+      provenance: [],
+    };
 
-  const subdomains = Array.isArray(infrastructure?.subdomains)
-    ? infrastructure.subdomains
-    : [];
+  const subdomains =
+    Array.isArray(
+      infrastructure.subdomains
+    )
+      ? infrastructure.subdomains
+      : [];
 
-  const certificates = Array.isArray(infrastructure?.certificates)
-    ? infrastructure.certificates
-    : [];
+  const certificates =
+    Array.isArray(
+      infrastructure.certificates
+    )
+      ? infrastructure.certificates
+      : [];
 
-  const ipAddresses = Array.isArray(infrastructure?.ip_addresses)
-    ? infrastructure.ip_addresses
-    : [];
+  const ipAddresses =
+    Array.isArray(
+      infrastructure.ip_addresses
+    )
+      ? infrastructure.ip_addresses
+      : [];
 
-  const asns = Array.isArray(infrastructure?.asns)
-    ? infrastructure.asns
-    : [];
+  const asns =
+    Array.isArray(
+      infrastructure.asns
+    )
+      ? infrastructure.asns
+      : [];
 
-  const organizations = Array.isArray(infrastructure?.organizations)
-    ? infrastructure.organizations
-    : [];
+  const organizations =
+    Array.isArray(
+      infrastructure.organizations
+    )
+      ? infrastructure.organizations
+      : [];
 
-  // Safe VirusTotal data extraction
-  const virustotal = analysis?.virustotal || {};
-  const vtRiskScore = virustotal?.risk_score ?? 0;
-  const vtSecuritySummary = virustotal?.security_summary || {};
-  const vtVendorBreakdown = Array.isArray(virustotal?.vendor_breakdown) ? virustotal.vendor_breakdown : [];
-  const vtRiskFactors = Array.isArray(virustotal?.risk_factors) ? virustotal.risk_factors : [];
-  const vtWhois = virustotal?.whois_info || {};
-  const vtCommunityVotes = virustotal?.community_votes || {};
+  const virustotal =
+    analysis?.virustotal || {};
+
+  const vtRiskScore =
+    Number(
+      virustotal?.risk_score
+    ) || 0;
+
+  const vtSecuritySummary =
+    virustotal?.security_summary ||
+    {};
+
+  const vtVendorBreakdown =
+    Array.isArray(
+      virustotal?.vendor_breakdown
+    )
+      ? virustotal.vendor_breakdown
+      : [];
+
+  const vtRiskFactors =
+    Array.isArray(
+      virustotal?.risk_factors
+    )
+      ? virustotal.risk_factors
+      : [];
+
+  const vtWhois =
+    virustotal?.whois_info ||
+    {};
+
+  const vtCommunityVotes =
+    virustotal?.community_votes ||
+    {};
+
+  const portScanData =
+    analysis?.port_scan || {
+      scanned_ips: 0,
+      open_ports_total: 0,
+      results: [],
+    };
 
   // ============================================================
   // OBSERVATION HELPER
   // ============================================================
 
-  const getObservation = (keyword) => {
-    return observations.find(
-      (observation) =>
-        typeof observation === "string" &&
-        observation
-          .toLowerCase()
-          .includes(keyword.toLowerCase())
-    );
-  };
+  const getObservation =
+    (keyword) =>
+      observations.find(
+        (observation) =>
+          typeof observation ===
+            "string" &&
+          observation
+            .toLowerCase()
+            .includes(
+              keyword.toLowerCase()
+            )
+      );
 
-  // ============================================================
-  // EXTRACT VIRUSTOTAL COUNT
-  // ============================================================
-
-  const getDetectionCount = (keyword) => {
-    const observation = getObservation(keyword);
-
-    if (!observation) return "0";
-
-    const match = observation.match(/\d+/);
-
-    return match?.[0] || "0";
-  };
-
-  // ============================================================
-  // DOWNLOAD SUBDOMAIN PDF
-  // ============================================================
-
-  const downloadSubdomainsPDF = () => {
-    if (subdomains.length === 0) return;
-
-    const pdf = new jsPDF({
-      orientation: "portrait",
-      unit: "mm",
-      format: "a4",
-    });
-
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 15;
-    const lineHeight = 6;
-
-    let y = 20;
-
-    pdf.setFontSize(18);
-    pdf.setFont("helvetica", "bold");
-
-    pdf.text(
-      "DomainAtlas — Subdomain Inventory",
-      margin,
-      y
-    );
-
-    y += 9;
-
-    pdf.setFontSize(11);
-    pdf.setFont("helvetica", "normal");
-
-    pdf.text(
-      `Target Domain: ${analysis?.domain || domain}`,
-      margin,
-      y
-    );
-
-    y += 6;
-
-    pdf.text(
-      `Total Subdomains: ${subdomains.length}`,
-      margin,
-      y
-    );
-
-    y += 6;
-
-    pdf.text(
-      `Generated: ${new Date().toLocaleString()}`,
-      margin,
-      y
-    );
-
-    y += 10;
-
-    const numberX = margin;
-    const subdomainX = margin + 15;
-
-    pdf.setFontSize(9);
-    pdf.setFont("helvetica", "bold");
-
-    pdf.text("#", numberX, y);
-    pdf.text("Subdomain", subdomainX, y);
-
-    y += 3;
-
-    pdf.line(
-      margin,
-      y,
-      pageWidth - margin,
-      y
-    );
-
-    y += 6;
-
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(9);
-
-    subdomains.forEach((subdomain, index) => {
-      if (y + lineHeight > pageHeight - margin) {
-        pdf.addPage();
-        y = 20;
-
-        pdf.setFont("helvetica", "bold");
-        pdf.text(
-          "DomainAtlas — Subdomain Inventory",
-          margin,
-          y
+  const getDetectionCount =
+    (keyword) => {
+      const observation =
+        getObservation(
+          keyword
         );
-        y += 8;
-        pdf.setFont("helvetica", "normal");
-        pdf.setFontSize(9);
+
+      if (!observation) {
+        return "0";
       }
 
-      const value = String(subdomain ?? "");
-      pdf.text(String(index + 1), numberX, y);
+      const match =
+        observation.match(
+          /\d+/
+        );
 
-      const maxWidth = pageWidth - subdomainX - margin;
-      const lines = pdf.splitTextToSize(value, maxWidth);
-      pdf.text(lines, subdomainX, y);
-
-      y += lineHeight * Math.max(1, lines.length);
-
-      pdf.setDrawColor(220);
-      pdf.line(margin, y - 2, pageWidth - margin, y - 2);
-      pdf.setDrawColor(0);
-
-      y += 2;
-    });
-
-    const totalPages = pdf.internal.getNumberOfPages();
-
-    for (let page = 1; page <= totalPages; page++) {
-      pdf.setPage(page);
-      pdf.setFontSize(8);
-      pdf.setFont("helvetica", "normal");
-      pdf.setTextColor(100);
-
-      pdf.text(
-        `DomainAtlas | ${analysis?.domain || domain}`,
-        margin,
-        pageHeight - 8
+      return (
+        match?.[0] || "0"
       );
-
-      pdf.text(
-        `Page ${page} of ${totalPages}`,
-        pageWidth - margin,
-        pageHeight - 8,
-        { align: "right" }
-      );
-
-      pdf.setTextColor(0);
-    }
-
-    const safeDomain = (analysis?.domain || domain).replace(/[^a-z0-9.-]/gi, "_");
-    pdf.save(`${safeDomain}_subdomains.pdf`);
-  };
+    };
 
   // ============================================================
-  // DOWNLOAD AI REPORT PDF
+  // PDF HANDLERS
   // ============================================================
 
-  const downloadAIReportPDF = () => {
-    if (!aiReport) return;
-
-    const pdf = new jsPDF({
-      orientation: "portrait",
-      unit: "mm",
-      format: "a4",
-    });
-
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 15;
-    const contentWidth = pageWidth - margin * 2;
-
-    let y = 20;
-
-    pdf.setFontSize(18);
-    pdf.setFont("helvetica", "bold");
-    pdf.text("DomainAtlas — AI Intelligence Report", margin, y);
-
-    y += 10;
-
-    pdf.setFontSize(11);
-    pdf.setFont("helvetica", "normal");
-    pdf.text(`Target Domain: ${analysis?.domain || domain}`, margin, y);
-
-    y += 6;
-    pdf.text(`Generated: ${new Date().toLocaleString()}`, margin, y);
-
-    y += 10;
-
-    pdf.setDrawColor(180);
-    pdf.line(margin, y, pageWidth - margin, y);
-    y += 8;
-
-    const lines = aiReport.split("\n");
-
-    pdf.setFontSize(10);
-
-    lines.forEach((line) => {
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        y += 4;
-        return;
-      }
-
-      if (trimmed.startsWith("**") && trimmed.endsWith("**")) {
-        const heading = trimmed.replace(/\*\*/g, "");
-
-        if (y > pageHeight - 30) {
-          pdf.addPage();
-          y = 20;
-        }
-
-        pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(12);
-
-        const headingLines = pdf.splitTextToSize(heading, contentWidth);
-        pdf.text(headingLines, margin, y);
-
-        y += 6 * Math.max(1, headingLines.length) + 3;
-        return;
-      }
-
-      let text = trimmed;
-
-      if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-        text = "• " + trimmed.substring(2);
-      }
-
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(10);
-
-      const textLines = pdf.splitTextToSize(text, contentWidth);
-      const requiredHeight = textLines.length * 5;
-
-      if (y + requiredHeight > pageHeight - 20) {
-        pdf.addPage();
-        y = 20;
-      }
-
-      pdf.text(textLines, margin, y);
-      y += requiredHeight + 2;
-    });
-
-    if (y + 25 > pageHeight - 15) {
-      pdf.addPage();
-      y = 20;
-    }
-
-    y += 5;
-
-    pdf.setDrawColor(150);
-    pdf.rect(margin, y, contentWidth, 22);
-
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(9);
-    pdf.text("Analytical Limitation", margin + 5, y + 7);
-
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(8);
-
-    const limitation =
-      "This report reflects only the collected OSINT data and does not establish ownership, maliciousness, benignness, or security posture.";
-
-    const limitationLines = pdf.splitTextToSize(limitation, contentWidth - 10);
-    pdf.text(limitationLines, margin + 5, y + 13);
-
-    const totalPages = pdf.internal.getNumberOfPages();
-
-    for (let page = 1; page <= totalPages; page++) {
-      pdf.setPage(page);
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(8);
-      pdf.setTextColor(100);
-
-      pdf.text(`DomainAtlas | ${analysis?.domain || domain}`, margin, pageHeight - 8);
-      pdf.text(`Page ${page} of ${totalPages}`, pageWidth - margin, pageHeight - 8, {
-        align: "right",
+  const handleDownloadSubdomains =
+    () => {
+      downloadSubdomainsPDF({
+        domain:
+          analysis?.domain ||
+          domain,
+        subdomains,
       });
+    };
 
-      pdf.setTextColor(0);
-    }
-
-    const safeDomain = (analysis?.domain || domain).replace(/[^a-z0-9.-]/gi, "_");
-    pdf.save(`${safeDomain}_DomainAtlas_AI_Report.pdf`);
-  };
-
-  // ============================================================
-  // ERROR BOUNDARY FOR RENDER
-  // ============================================================
-
-  useEffect(() => {
-    if (analysis) {
-      try {
-        // Test render by accessing safe properties
-        const testData = {
-          subdomains: Array.isArray(analysis.infrastructure?.subdomains) ? analysis.infrastructure.subdomains : [],
-          virustotal: analysis.virustotal || {},
-          statistics: analysis.statistics || {}
-        };
-        console.log("[*] Analysis data is valid for rendering:", testData);
-        setRenderError(null);
-      } catch (e) {
-        console.error("[!] Error in analysis data:", e);
-        setRenderError("Error processing analysis data. Please try again.");
-      }
-    }
-  }, [analysis]);
+  const handleDownloadAIReport =
+    () => {
+      downloadAIReportPDF({
+        domain:
+          analysis?.domain ||
+          domain,
+        aiReport,
+      });
+    };
 
   // ============================================================
   // RENDER
   // ============================================================
-
-  if (renderError) {
-    return (
-      <div className="app">
-        <div className="error-container">
-          <Shield size={48} />
-          <h2>Something went wrong</h2>
-          <p>{renderError}</p>
-          <button onClick={() => window.location.reload()}>Refresh Page</button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="app">
@@ -1034,89 +1138,156 @@ function App() {
             WORKSPACE
           </p>
 
-          <button
-            className={`nav-item ${activeNav === "overview" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav ===
+              "overview"
+            }
+            icon={
+              <BarChart3
+                size={17}
+              />
+            }
+            label="Overview"
             onClick={() =>
               scrollToSection(
                 dashboardRef,
                 "overview"
               )
             }
-          >
-            <BarChart3 size={17} />
-            <span>Overview</span>
-          </button>
+          />
 
-          <button
-            className={`nav-item ${activeNav === "infrastructure" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav ===
+              "infrastructure"
+            }
+            icon={
+              <Server
+                size={17}
+              />
+            }
+            label="Infrastructure"
             onClick={() =>
               scrollToSection(
                 infrastructureRef,
                 "infrastructure"
               )
             }
-          >
-            <Server size={17} />
-            <span>Infrastructure</span>
-          </button>
+          />
 
-          <button
-            className={`nav-item ${activeNav === "graph" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav === "graph"
+            }
+            icon={
+              <Network
+                size={17}
+              />
+            }
+            label="Relationship Graph"
             onClick={() =>
               scrollToSection(
                 graphRef,
                 "graph"
               )
             }
-          >
-            <Network size={17} />
-            <span>
-              Relationship Graph
-            </span>
-          </button>
+          />
 
-          <button
-            className={`nav-item ${activeNav === "subdomains" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav ===
+              "subdomains"
+            }
+            icon={
+              <Globe
+                size={17}
+              />
+            }
+            label="Subdomains"
             onClick={() =>
               scrollToSection(
                 subdomainsRef,
                 "subdomains"
               )
             }
-          >
-            <Globe size={17} />
-            <span>Subdomains</span>
-          </button>
+          />
 
-          <button
-            className={`nav-item ${activeNav === "certificates" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav ===
+              "certificates"
+            }
+            icon={
+              <FileKey
+                size={17}
+              />
+            }
+            label="Certificates"
             onClick={() =>
               scrollToSection(
                 certificatesRef,
                 "certificates"
               )
             }
-          >
-            <FileKey size={17} />
-            <span>Certificates</span>
-          </button>
+          />
+
+          <NavButton
+            active={
+              activeNav === "ports"
+            }
+            icon={
+              <Plug size={17} />
+            }
+            label="Port Scan"
+            onClick={() =>
+              scrollToSection(
+                portsRef,
+                "ports"
+              )
+            }
+          />
 
           <p className="nav-label">
             INTELLIGENCE
           </p>
 
-          <button
-            className={`nav-item ${activeNav === "ai" ? "active" : ""}`}
+          <NavButton
+            active={
+              activeNav ===
+              "virustotal"
+            }
+            icon={
+              <Shield
+                size={17}
+              />
+            }
+            label="VirusTotal"
+            onClick={() =>
+              scrollToSection(
+                virustotalRef,
+                "virustotal"
+              )
+            }
+          />
+
+          <NavButton
+            active={
+              activeNav === "ai"
+            }
+            icon={
+              <Brain
+                size={17}
+              />
+            }
+            label="AI Assessment"
             onClick={() =>
               scrollToSection(
                 aiReportRef,
                 "ai"
               )
             }
-          >
-            <Brain size={17} />
-            <span>AI Assessment</span>
-          </button>
+          />
 
         </nav>
 
@@ -1147,109 +1318,171 @@ function App() {
       <main className="main-content">
 
         {/* ====================================================
-            HERO / INTRO SECTION
+            HERO
         ==================================================== */}
 
-        {showIntro && !analysis && !loading && (
-          <section className="hero-section" ref={heroRef}>
+        {showIntro &&
+          !analysis &&
+          !loading && (
+            <section className="hero-section">
 
-            <div className="hero-glow" />
-            <div className="hero-grid" />
+              <div className="hero-glow" />
+              <div className="hero-grid" />
 
-            <div className="hero-content">
+              <div className="hero-content">
 
-              <div className="hero-badge">
-                <Sparkles size={14} />
-                <span>Next-Gen OSINT Platform</span>
-              </div>
-
-              <h1 className="hero-title">
-                Map the Digital<br />
-                <span className="hero-highlight">Frontier</span>
-              </h1>
-
-              <p className="hero-description">
-                DomainAtlas combines automated OSINT collection,
-                knowledge graph correlation, and AI-powered analysis
-                to give you complete visibility into any domain's
-                digital footprint.
-              </p>
-
-              <div className="hero-features">
-                <div className="hero-feature">
-                  <Compass size={16} />
-                  <span>Intelligent Discovery</span>
-                </div>
-                <div className="hero-feature">
-                  <Network size={16} />
-                  <span>Graph Correlation</span>
-                </div>
-                <div className="hero-feature">
-                  <Brain size={16} />
-                  <span>AI Assessment</span>
-                </div>
-                <div className="hero-feature">
-                  <Zap size={16} />
-                  <span>Real-time Analysis</span>
-                </div>
-              </div>
-
-              <div className="hero-search-wrapper">
-                <div className="search-box hero-search">
-                  <div className="search-icon">
-                    <Search size={19} />
-                  </div>
-                  <input
-                    type="text"
-                    placeholder="Enter a domain to analyze…"
-                    value={domain}
-                    onChange={(event) =>
-                      setDomain(
-                        event.target.value
-                      )
-                    }
-                    onKeyDown={handleKeyDown}
-                    disabled={loading}
-                    className="hero-input"
+                <div className="hero-badge">
+                  <Sparkles
+                    size={14}
                   />
-                  <button
-                    onClick={analyzeDomain}
-                    disabled={loading}
-                    className="analyze-button hero-analyze-btn"
-                  >
-                    {loading
-                      ? "Analyzing..."
-                      : "Analyze Domain"}
-                    {!loading && (
-                      <ArrowRight size={17} />
-                    )}
-                  </button>
-                </div>
-
-                {error && (
-                  <div className="error-message">
-                    <Shield size={15} />
-                    <span>{error}</span>
-                  </div>
-                )}
-
-                <div className="hero-search-meta">
                   <span>
-                    <Target size={12} />
-                    DNS · Subdomains · Certificates · Graph · AI
+                    Next-Gen OSINT
+                    Platform
                   </span>
                 </div>
-              </div>
 
-            </div>
-          </section>
-        )}
+                <h1 className="hero-title">
+                  Map the Digital
+                  <br />
+                  <span className="hero-highlight">
+                    Frontier
+                  </span>
+                </h1>
+
+                <p className="hero-description">
+                  DomainAtlas combines
+                  automated OSINT
+                  collection, knowledge
+                  graph correlation, and
+                  AI-powered analysis to
+                  give you complete
+                  visibility into any
+                  domain's digital
+                  footprint.
+                </p>
+
+                <div className="hero-features">
+
+                  <div className="hero-feature">
+                    <Compass
+                      size={16}
+                    />
+                    <span>
+                      Intelligent
+                      Discovery
+                    </span>
+                  </div>
+
+                  <div className="hero-feature">
+                    <Network
+                      size={16}
+                    />
+                    <span>
+                      Graph Correlation
+                    </span>
+                  </div>
+
+                  <div className="hero-feature">
+                    <Brain
+                      size={16}
+                    />
+                    <span>
+                      AI Assessment
+                    </span>
+                  </div>
+
+                  <div className="hero-feature">
+                    <Zap
+                      size={16}
+                    />
+                    <span>
+                      Real-time Analysis
+                    </span>
+                  </div>
+
+                </div>
+
+                <div className="hero-search-wrapper">
+
+                  <div className="search-box hero-search">
+
+                    <div className="search-icon">
+                      <Search
+                        size={19}
+                      />
+                    </div>
+
+                    <input
+                      type="text"
+                      placeholder="Enter a domain to analyze…"
+                      value={domain}
+                      onChange={(event) =>
+                        setDomain(
+                          event.target
+                            .value
+                        )
+                      }
+                      onKeyDown={
+                        handleKeyDown
+                      }
+                      disabled={loading}
+                      className="hero-input"
+                    />
+
+                    <button
+                      onClick={
+                        analyzeDomain
+                      }
+                      disabled={loading}
+                      className="analyze-button hero-analyze-btn"
+                    >
+                      {loading
+                        ? "Analyzing..."
+                        : "Analyze Domain"}
+
+                      {!loading && (
+                        <ArrowRight
+                          size={17}
+                        />
+                      )}
+                    </button>
+
+                  </div>
+
+                  {error && (
+                    <div className="error-message">
+                      <Shield
+                        size={15}
+                      />
+                      <span>
+                        {error}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="hero-search-meta">
+                    <span>
+                      <Target
+                        size={12}
+                      />
+                      DNS · Subdomains ·
+                      Certificates · Ports ·
+                      Graph · AI
+                    </span>
+                  </div>
+
+                </div>
+
+              </div>
+            </section>
+          )}
 
         {/* ====================================================
-            TOP HEADER (Results View)
+            TOP HEADER
         ==================================================== */}
 
-        {(analysis || loading) && (
+        {(analysis ||
+          loading) && (
           <header
             className="topbar"
             ref={dashboardRef}
@@ -1262,7 +1495,9 @@ function App() {
                   DOMAIN ATLAS
                 </span>
 
-                <ChevronRight size={13} />
+                <ChevronRight
+                  size={13}
+                />
 
                 <span>
                   ANALYSIS
@@ -1274,8 +1509,9 @@ function App() {
               </h2>
 
               <p>
-                Automated collection, correlation
-                and intelligence analysis.
+                Automated collection,
+                correlation and
+                intelligence analysis.
               </p>
 
             </div>
@@ -1291,7 +1527,6 @@ function App() {
               />
 
               <div>
-
                 <strong>
                   {loading
                     ? "ANALYSIS RUNNING"
@@ -1301,9 +1536,9 @@ function App() {
                 <span>
                   {loading
                     ? `Processing intelligence (${currentProgress}%)`
-                    : analysis?.domain || "Awaiting target"}
+                    : analysis?.domain ||
+                      "Awaiting target"}
                 </span>
-
               </div>
 
             </div>
@@ -1312,7 +1547,7 @@ function App() {
         )}
 
         {/* ====================================================
-            LOADING - PROGRESS PIPELINE WITH STOP BUTTON
+            LOADING PIPELINE
         ==================================================== */}
 
         {loading && (
@@ -1323,20 +1558,22 @@ function App() {
               <div className="pipeline-header">
 
                 <div>
-
                   <p className="eyebrow">
                     COLLECTION PIPELINE
                   </p>
 
                   <h3>
-                    OSINT Analysis in Progress
+                    OSINT Analysis in
+                    Progress
                   </h3>
 
                   <p>
-                    Real-time collection and analysis
-                    for <strong>{domain}</strong>
+                    Real-time collection
+                    and analysis for{" "}
+                    <strong>
+                      {domain}
+                    </strong>
                   </p>
-
                 </div>
 
                 <div className="pipeline-header-right">
@@ -1347,10 +1584,14 @@ function App() {
 
                   <button
                     className="stop-button"
-                    onClick={stopAnalysis}
+                    onClick={
+                      stopAnalysis
+                    }
                     disabled={!loading}
                   >
-                    <Square size={16} />
+                    <Square
+                      size={16}
+                    />
                     Stop Scan
                   </button>
 
@@ -1359,14 +1600,12 @@ function App() {
               </div>
 
               <div className="progress-bar-container">
-
                 <div
                   className="progress-bar-fill"
                   style={{
                     width: `${currentProgress}%`,
                   }}
                 />
-
               </div>
 
               <div className="pipeline-steps">
@@ -1375,1156 +1614,1560 @@ function App() {
                   label="Initialization"
                   message="Pipeline started"
                   progress={5}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "init"
+                      (p) =>
+                        p.step ===
+                        "init"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="DNS Resolution"
                   message="Querying DNS records"
                   progress={15}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "dns"
+                      (p) =>
+                        p.step ===
+                        "dns"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="IP Metadata"
                   message="Looking up ASN and organization"
                   progress={25}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "ip_metadata"
+                      (p) =>
+                        p.step ===
+                        "ip_metadata"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="Subdomain Discovery"
                   message="Running subdomain enumeration"
                   progress={45}
-                  currentProgress={currentProgress}
-                  status={
-                    progress.some(
-                      (p) =>
-                        (p.step === "subfinder" || p.step === "amass") &&
-                        p.status === "running"
-                    )
-                      ? "running"
-                      : progress.some(
-                        (p) =>
-                          (p.step === "subfinder" || p.step === "amass") &&
-                          p.status === "completed"
-                      )
-                        ? "completed"
-                        : progress.some(
-                          (p) =>
-                            (p.step === "subfinder" || p.step === "amass") &&
-                            p.status === "cancelled"
-                        )
-                          ? "cancelled"
-                          : undefined
+                  currentProgress={
+                    currentProgress
                   }
-                  isCancelled={stopRequested}
+                  status={getCombinedDiscoveryStatus()}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="Certificate Intelligence"
                   message="Querying Certificate Transparency"
                   progress={65}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "certificates"
+                      (p) =>
+                        p.step ===
+                        "certificates"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="VirusTotal Intelligence"
                   message="Querying VirusTotal API"
                   progress={75}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "virustotal"
+                      (p) =>
+                        p.step ===
+                        "virustotal"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="Entity Normalization"
                   message="Normalizing entities"
                   progress={80}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "normalization"
+                      (p) =>
+                        p.step ===
+                        "normalization"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="Knowledge Graph"
                   message="Loading into Neo4j"
                   progress={85}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "graph_loading"
+                      (p) =>
+                        p.step ===
+                        "graph_loading"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="Graph Analysis"
                   message="Analyzing knowledge graph"
                   progress={92}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "graph_analysis"
+                      (p) =>
+                        p.step ===
+                        "graph_analysis"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
                 <PipelineStep
                   label="AI Intelligence Report"
                   message="Generating AI assessment"
                   progress={97}
-                  currentProgress={currentProgress}
+                  currentProgress={
+                    currentProgress
+                  }
                   status={
                     progress.find(
-                      (p) => p.step === "ai_report"
+                      (p) =>
+                        p.step ===
+                        "ai_report"
                     )?.status
                   }
-                  isCancelled={stopRequested}
+                  isCancelled={
+                    stopRequested
+                  }
                 />
 
               </div>
-
             </div>
-
           </section>
         )}
 
         {/* ====================================================
-            RESULTS - Only render if analysis exists and not loading
+            RESULTS
         ==================================================== */}
 
-        {analysis && !loading && (
-          <>
+        {analysis &&
+          !loading && (
+            <>
 
-            {/* ==================================================
-                ANALYSIS HEADER
-            ================================================== */}
+              {/* ==============================================
+                  COMPLETE BANNER
+              ============================================== */}
 
-            <section className="analysis-banner">
-
-              <div>
-
-                <p className="eyebrow">
-                  ANALYSIS COMPLETE
-                </p>
-
-                <h3>
-                  {analysis.domain}
-                </h3>
-
-                <p>
-                  Intelligence collection and
-                  graph analysis completed successfully.
-                </p>
-
-              </div>
-
-              <div className="analysis-complete">
-
-                <Activity size={16} />
-
-                <span>
-                  COMPLETE
-                </span>
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                OVERVIEW
-            ================================================== */}
-
-            <section className="results-section">
-
-              <div className="section-heading">
+              <section className="analysis-banner">
 
                 <div>
-
                   <p className="eyebrow">
-                    01 / OVERVIEW
+                    ANALYSIS COMPLETE
                   </p>
 
                   <h3>
-                    Infrastructure Summary
+                    {analysis.domain}
                   </h3>
 
+                  <p>
+                    Intelligence collection
+                    and graph analysis
+                    completed successfully.
+                  </p>
                 </div>
 
-                <span className="domain-badge">
-                  <Globe size={14} />
-                  {analysis.domain}
-                </span>
+                <div className="analysis-complete">
+                  <Activity
+                    size={16}
+                  />
 
-              </div>
+                  <span>
+                    COMPLETE
+                  </span>
+                </div>
 
-              <div className="stat-grid">
+              </section>
 
-                <StatCard
-                  icon={<Globe />}
-                  label="Subdomains"
-                  value={
-                    statistics.subdomains ?? 0
-                  }
-                  description="Discovered"
-                />
+              {/* ==============================================
+                  OVERVIEW
+              ============================================== */}
 
-                <StatCard
-                  icon={<Server />}
-                  label="IP Addresses"
-                  value={
-                    statistics.ip_addresses ?? 0
-                  }
-                  description={
-                    `${ipVersion.ipv4 ?? 0} IPv4 · ` +
-                    `${ipVersion.ipv6 ?? 0} IPv6`
-                  }
-                />
+              <section className="results-section">
 
-                <StatCard
-                  icon={<Network />}
-                  label="ASNs"
-                  value={
-                    statistics.asns ?? 0
-                  }
-                  description="Identified"
-                />
-
-                <StatCard
-                  icon={<Database />}
-                  label="Organizations"
-                  value={
-                    statistics.organizations ?? 0
-                  }
-                  description="Associated"
-                />
-
-                <StatCard
-                  icon={<FileKey />}
-                  label="Certificates"
-                  value={
-                    statistics.certificates ?? 0
-                  }
-                  description="Identified"
-                />
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                INFRASTRUCTURE
-            ================================================== */}
-
-            <section
-              ref={infrastructureRef}
-              className="panel-section"
-            >
-
-              <div className="panel">
-
-                <div className="panel-header">
+                <div className="section-heading">
 
                   <div>
-
                     <p className="eyebrow">
-                      02 / NETWORK
+                      01 / OVERVIEW
                     </p>
 
                     <h3>
                       Infrastructure
+                      Summary
                     </h3>
-
-                    <p className="panel-description">
-                      Observed network infrastructure
-                      associated with the target domain.
-                    </p>
-
                   </div>
 
-                  <div className="panel-icon">
-                    <Server size={20} />
-                  </div>
+                  <span className="domain-badge">
+                    <Globe
+                      size={14}
+                    />
+                    {analysis.domain}
+                  </span>
 
                 </div>
 
-                <div className="info-list">
+                <div className="stat-grid">
 
-                  {ipAddresses
-                    .slice(0, 8)
-                    .map((ip) => (
-                      <InfoRow
-                        key={ip}
-                        label={
-                          ip.includes(":")
-                            ? "IPv6"
-                            : "IPv4"
-                        }
-                        value={ip}
+                  <StatCard
+                    icon={<Globe />}
+                    label="Subdomains"
+                    value={
+                      statistics.subdomains ??
+                      0
+                    }
+                    description="Discovered"
+                  />
+
+                  <StatCard
+                    icon={<Server />}
+                    label="IP Addresses"
+                    value={
+                      statistics.ip_addresses ??
+                      0
+                    }
+                    description={
+                      `${ipVersion.ipv4 ?? 0} IPv4 · ` +
+                      `${ipVersion.ipv6 ?? 0} IPv6`
+                    }
+                  />
+
+                  <StatCard
+                    icon={<Network />}
+                    label="ASNs"
+                    value={
+                      statistics.asns ??
+                      0
+                    }
+                    description="Identified"
+                  />
+
+                  <StatCard
+                    icon={<Database />}
+                    label="Organizations"
+                    value={
+                      statistics.organizations ??
+                      0
+                    }
+                    description="Associated"
+                  />
+
+                  <StatCard
+                    icon={<FileKey />}
+                    label="Certificates"
+                    value={
+                      statistics.certificates ??
+                      0
+                    }
+                    description="Identified"
+                  />
+
+                  <StatCard
+                    icon={<Plug />}
+                    label="Open Ports"
+                    value={
+                      portScanData.open_ports_total ||
+                      0
+                    }
+                    description={`${portScanData.scanned_ips || 0} IPs scanned`}
+                  />
+
+                </div>
+
+              </section>
+
+              {/* ==============================================
+                  INFRASTRUCTURE
+              ============================================== */}
+
+              <section
+                ref={
+                  infrastructureRef
+                }
+                className="panel-section"
+              >
+
+                <div className="panel">
+
+                  <div className="panel-header">
+
+                    <div>
+                      <p className="eyebrow">
+                        02 / NETWORK
+                      </p>
+
+                      <h3>
+                        Infrastructure
+                      </h3>
+
+                      <p className="panel-description">
+                        Observed network
+                        infrastructure
+                        associated with the
+                        target domain.
+                      </p>
+                    </div>
+
+                    <div className="panel-icon">
+                      <Server
+                        size={20}
                       />
-                    ))}
+                    </div>
 
-                  {asns.map((asn) => (
-                    <InfoRow
-                      key={asn}
-                      label="ASN"
-                      value={asn}
-                    />
-                  ))}
+                  </div>
 
-                  {organizations.map(
-                    (organization) => (
-                      <InfoRow
-                        key={organization}
-                        label="Organization"
-                        value={organization}
-                      />
-                    )
-                  )}
+                  <div className="info-list">
 
-                  {ipAddresses.length === 0 &&
-                    asns.length === 0 &&
-                    organizations.length === 0 && (
-                      <div className="empty-inline">
-                        No infrastructure data
-                        available.
-                      </div>
+                    {ipAddresses
+                      .slice(0, 8)
+                      .map((ip) => (
+                        <InfoRow
+                          key={ip}
+                          label={
+                            ip.includes(
+                              ":"
+                            )
+                              ? "IPv6"
+                              : "IPv4"
+                          }
+                          value={ip}
+                        />
+                      ))}
+
+                    {asns.map(
+                      (asn) => (
+                        <InfoRow
+                          key={asn}
+                          label="ASN"
+                          value={asn}
+                        />
+                      )
                     )}
 
-                </div>
+                    {organizations.map(
+                      (organization) => (
+                        <InfoRow
+                          key={
+                            organization
+                          }
+                          label="Organization"
+                          value={
+                            organization
+                          }
+                        />
+                      )
+                    )}
 
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                GRAPH
-            ================================================== */}
-
-            <section
-              ref={graphRef}
-              className="panel-section"
-            >
-
-              <div className="panel graph-panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      03 / CORRELATION
-                    </p>
-
-                    <h3>
-                      Intelligence Graph
-                    </h3>
-
-                    <p className="panel-description">
-                      Correlated entities and observed
-                      relationships within the collected dataset.
-                    </p>
+                    {ipAddresses.length ===
+                      0 &&
+                      asns.length ===
+                        0 &&
+                      organizations.length ===
+                        0 && (
+                        <div className="empty-inline">
+                          No infrastructure
+                          data available.
+                        </div>
+                      )}
 
                   </div>
 
-                  <div className="panel-icon">
-                    <Network size={20} />
-                  </div>
-
                 </div>
 
-                <div className="graph-wrapper">
-                  <GraphView
-                    graph={{
-                      ...graph,
-                      provenance: provenance
-                    }}
-                    domain={analysis.domain}
-                    subdomainCount={statistics.subdomains || 0}
-                    allSubdomains={subdomains}  // <-- Add this line
-                  />
-                </div>
+              </section>
 
-                <div className="graph-legend">
+              {/* ==============================================
+                  GRAPH
+              ============================================== */}
 
-                  <span>
-                    <i className="legend-domain" />
-                    Domain
-                  </span>
+              <section
+                ref={graphRef}
+                className="panel-section"
+              >
 
-                  <span>
-                    <i className="legend-ip" />
-                    IP
-                  </span>
+                <div className="panel graph-panel">
 
-                  <span>
-                    <i className="legend-asn" />
-                    ASN
-                  </span>
+                  <div className="panel-header">
 
-                  <span>
-                    <i className="legend-org" />
-                    Organization
-                  </span>
+                    <div>
+                      <p className="eyebrow">
+                        03 / CORRELATION
+                      </p>
 
-                  <span>
-                    <i className="legend-cert" />
-                    Certificate
-                  </span>
+                      <h3>
+                        Intelligence Graph
+                      </h3>
 
-                </div>
+                      <p className="panel-description">
+                        Correlated entities
+                        and observed
+                        relationships within
+                        the collected dataset.
+                      </p>
+                    </div>
 
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                SUBDOMAINS
-            ================================================== */}
-
-            <section
-              ref={subdomainsRef}
-              className="panel-section"
-            >
-
-              <div className="panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      04 / DISCOVERY
-                    </p>
-
-                    <h3>
-                      Subdomain Inventory
-                    </h3>
-
-                    <p className="panel-description">
-                      Complete list of discovered
-                      subdomains.
-                    </p>
+                    <div className="panel-icon">
+                      <Network
+                        size={20}
+                      />
+                    </div>
 
                   </div>
 
-                  <button
-                    className="download-button"
-                    onClick={
-                      downloadSubdomainsPDF
-                    }
-                    disabled={
-                      subdomains.length === 0
-                    }
-                  >
-                    <Download size={15} />
-                    Export Inventory
-                  </button>
+                  <div className="graph-wrapper">
 
-                </div>
+                    <GraphView
+                      graph={{
+                        ...graph,
+                        provenance:
+                          provenance,
+                      }}
+                      domain={
+                        analysis.domain
+                      }
+                      subdomainCount={
+                        statistics.subdomains ||
+                        0
+                      }
+                      allSubdomains={
+                        subdomains
+                      }
+                    />
 
-                <div className="subdomain-summary">
+                  </div>
 
-                  <div className="inventory-count">
-
-                    <strong>
-                      {subdomains.length}
-                    </strong>
+                  <div className="graph-legend">
 
                     <span>
-                      discovered subdomains
+                      <i className="legend-domain" />
+                      Domain
+                    </span>
+
+                    <span>
+                      <i className="legend-ip" />
+                      IP
+                    </span>
+
+                    <span>
+                      <i className="legend-asn" />
+                      ASN
+                    </span>
+
+                    <span>
+                      <i className="legend-org" />
+                      Organization
+                    </span>
+
+                    <span>
+                      <i className="legend-cert" />
+                      Certificate
                     </span>
 
                   </div>
 
-                  <div className="inventory-note">
-
-                    <Layers3 size={14} />
-
-                    Graph visualization:
-
-                    <strong>
-                      first 5
-                    </strong>
-
-                  </div>
-
                 </div>
 
-                {subdomains.length > 0 ? (
+              </section>
 
-                  <div className="subdomain-table-wrapper">
+              {/* ==============================================
+                  SUBDOMAINS
+              ============================================== */}
 
-                    <table className="subdomain-table">
+              <section
+                ref={
+                  subdomainsRef
+                }
+                className="panel-section"
+              >
 
-                      <thead>
+                <div className="panel">
 
-                        <tr>
-                          <th>#</th>
-                          <th>Subdomain</th>
-                        </tr>
+                  <div className="panel-header">
 
-                      </thead>
+                    <div>
+                      <p className="eyebrow">
+                        04 / DISCOVERY
+                      </p>
 
-                      <tbody>
+                      <h3>
+                        Subdomain Inventory
+                      </h3>
 
-                        {subdomains.map(
-                          (
-                            subdomain,
-                            index
-                          ) => (
-
-                            <tr
-                              key={`${subdomain}-${index}`}
-                            >
-
-                              <td>
-                                {String(
-                                  index + 1
-                                ).padStart(
-                                  4,
-                                  "0"
-                                )}
-                              </td>
-
-                              <td>
-                                {subdomain}
-                              </td>
-
-                            </tr>
-
-                          )
-                        )}
-
-                      </tbody>
-
-                    </table>
-
-                  </div>
-
-                ) : (
-
-                  <div className="empty-inline">
-                    No subdomains discovered.
-                  </div>
-
-                )}
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                CERTIFICATES
-            ================================================== */}
-
-            <section
-              ref={certificatesRef}
-              className="panel-section"
-            >
-
-              <div className="panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      05 / TLS INTELLIGENCE
-                    </p>
-
-                    <h3>
-                      Certificate Inventory
-                    </h3>
-
-                    <p className="panel-description">
-                      Certificate identifiers observed
-                      during OSINT collection.
-                    </p>
-
-                  </div>
-
-                  <div className="panel-icon">
-                    <FileKey size={20} />
-                  </div>
-
-                </div>
-
-                <div className="certificate-grid">
-
-                  {certificates.length > 0 ? (
-
-                    certificates.map(
-                      (
-                        certificate,
-                        index
-                      ) => (
-
-                        <div
-                          className="certificate-card"
-                          key={`${certificate}-${index}`}
-                        >
-
-                          <div className="certificate-index">
-                            {String(
-                              index + 1
-                            ).padStart(
-                              2,
-                              "0"
-                            )}
-                          </div>
-
-                          <div>
-
-                            <span>
-                              CERTIFICATE
-                            </span>
-
-                            <strong>
-                              {certificate}
-                            </strong>
-
-                          </div>
-
-                        </div>
-
-                      )
-                    )
-
-                  ) : (
-
-                    <div className="empty-inline">
-                      No certificate data
-                      available.
+                      <p className="panel-description">
+                        Complete list of
+                        discovered
+                        subdomains.
+                      </p>
                     </div>
-
-                  )}
-
-                </div>
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                PATTERNS
-            ================================================== */}
-
-            <section className="panel-section">
-
-              <div className="panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      06 / PATTERN ANALYSIS
-                    </p>
-
-                    <h3>
-                      Subdomain Patterns
-                    </h3>
-
-                    <p className="panel-description">
-                      Structural characteristics observed
-                      across the discovered subdomain set.
-                    </p>
-
-                  </div>
-
-                  <div className="panel-icon">
-                    <Globe size={20} />
-                  </div>
-
-                </div>
-
-                <div className="pattern-grid">
-
-                  <PatternCard
-                    value={
-                      patterns.numeric_leading ??
-                      0
-                    }
-                    label="Numeric-leading"
-                  />
-
-                  <PatternCard
-                    value={
-                      patterns.contains_hyphen ??
-                      0
-                    }
-                    label="Contains hyphen"
-                  />
-
-                  <PatternCard
-                    value={
-                      patterns.multi_level ??
-                      0
-                    }
-                    label="Multi-level"
-                  />
-
-                  <PatternCard
-                    value={
-                      patterns.common_prefixes?.[0]
-                        ? patterns
-                          .common_prefixes[0]
-                          .count
-                        : 0
-                    }
-                    label={
-                      patterns.common_prefixes?.[0]
-                        ? `${patterns.common_prefixes[0].prefix} prefix`
-                        : "Common prefix"
-                    }
-                  />
-
-                </div>
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                VIRUSTOTAL INTELLIGENCE (ENHANCED)
-            ================================================== */}
-
-            <section className="panel-section">
-
-              <div className="panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      07 / EXTERNAL INTELLIGENCE
-                    </p>
-
-                    <h3>
-                      VirusTotal Analysis
-                    </h3>
-
-                    <p className="panel-description">
-                      Comprehensive threat intelligence from 70+ security vendors
-                    </p>
-
-                  </div>
-
-                  <div className="panel-icon">
-                    <Shield size={20} />
-                  </div>
-
-                </div>
-
-                {/* Check if we have VirusTotal data */}
-                {virustotal && typeof virustotal === 'object' && !virustotal.error ? (
-                  <>
-                    {/* Risk Score Card */}
-                    <div className="vt-risk-section">
-                      <div className={`vt-risk-score ${vtRiskScore >= 70 ? 'critical' : vtRiskScore >= 40 ? 'high' : vtRiskScore >= 20 ? 'medium' : 'low'}`}>
-                        <div className="vt-risk-number">
-                          {vtRiskScore}
-                          <span>/100</span>
-                        </div>
-                        <div className="vt-risk-label">
-                          Risk Score
-                        </div>
-                        <div className="vt-risk-level">
-                          {vtRiskScore >= 70 ? 'CRITICAL' :
-                            vtRiskScore >= 40 ? 'HIGH' :
-                              vtRiskScore >= 20 ? 'MEDIUM' : 'LOW'}
-                        </div>
-                      </div>
-
-                      <div className="vt-stats-grid">
-                        <div className="vt-stat">
-                          <span className="vt-stat-label">Malicious</span>
-                          <span className="vt-stat-value malicious">
-                            {vtSecuritySummary.malicious || 0}
-                          </span>
-                        </div>
-                        <div className="vt-stat">
-                          <span className="vt-stat-label">Suspicious</span>
-                          <span className="vt-stat-value suspicious">
-                            {vtSecuritySummary.suspicious || 0}
-                          </span>
-                        </div>
-                        <div className="vt-stat">
-                          <span className="vt-stat-label">Harmless</span>
-                          <span className="vt-stat-value harmless">
-                            {vtSecuritySummary.harmless || 0}
-                          </span>
-                        </div>
-                        <div className="vt-stat">
-                          <span className="vt-stat-label">Undetected</span>
-                          <span className="vt-stat-value undetected">
-                            {vtSecuritySummary.undetected || 0}
-                          </span>
-                        </div>
-                        <div className="vt-stat">
-                          <span className="vt-stat-label">Vendors</span>
-                          <span className="vt-stat-value">
-                            {vtSecuritySummary.total_vendors || 0}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Risk Factors */}
-                    {vtRiskFactors.length > 0 && (
-                      <div className="vt-risk-factors">
-                        <h4>⚠️ Risk Factors</h4>
-                        {vtRiskFactors.map((factor, index) => (
-                          <div key={index} className={`vt-risk-factor ${factor.severity || 'low'}`}>
-                            <div className="vt-factor-header">
-                              <span className={`vt-factor-badge ${factor.severity || 'low'}`}>
-                                {(factor.severity || 'low').toUpperCase()}
-                              </span>
-                              <span className="vt-factor-description">{factor.description}</span>
-                            </div>
-                            {factor.details && factor.details.length > 0 && (
-                              <ul className="vt-factor-details">
-                                {factor.details.map((detail, i) => (
-                                  <li key={i}>{detail}</li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Vendor Breakdown */}
-                    {vtVendorBreakdown.length > 0 && (
-                      <div className="vt-vendors">
-                        <h4>Security Vendor Analysis</h4>
-                        <div className="vt-vendor-grid">
-                          {vtVendorBreakdown
-                            .filter(v => v.status === 'malicious' || v.status === 'suspicious')
-                            .slice(0, 10)
-                            .map((vendor, index) => (
-                              <div key={index} className={`vt-vendor-item ${vendor.status}`}>
-                                <span className="vt-vendor-name">{vendor.vendor}</span>
-                                <span className={`vt-vendor-status ${vendor.status}`}>
-                                  {vendor.status}
-                                </span>
-                                <span className="vt-vendor-result">{vendor.result}</span>
-                              </div>
-                            ))}
-                        </div>
-                        {vtVendorBreakdown.filter(v => v.status === 'malicious' || v.status === 'suspicious').length > 10 && (
-                          <div className="vt-vendor-more">
-                            +{vtVendorBreakdown.filter(v => v.status === 'malicious' || v.status === 'suspicious').length - 10} more vendors
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* WHOIS Info */}
-                    {vtWhois && (vtWhois.registrar || vtWhois.creation_date) && (
-                      <div className="vt-whois">
-                        <h4>WHOIS Information</h4>
-                        <div className="vt-whois-grid">
-                          {vtWhois.registrar && (
-                            <div className="vt-whois-item">
-                              <span>Registrar</span>
-                              <strong>{vtWhois.registrar}</strong>
-                            </div>
-                          )}
-                          {vtWhois.creation_date && (
-                            <div className="vt-whois-item">
-                              <span>Creation Date</span>
-                              <strong>{vtWhois.creation_date}</strong>
-                            </div>
-                          )}
-                          {vtWhois.expiration_date && (
-                            <div className="vt-whois-item">
-                              <span>Expiration Date</span>
-                              <strong>{vtWhois.expiration_date}</strong>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Community Votes */}
-                    {vtCommunityVotes && (vtCommunityVotes.harmless !== undefined || vtCommunityVotes.malicious !== undefined) && (
-                      <div className="vt-community">
-                        <h4>Community Trust</h4>
-                        <div className="vt-community-bar">
-                          {(() => {
-                            const total = (vtCommunityVotes.harmless || 0) + (vtCommunityVotes.malicious || 0);
-                            const harmlessPct = total > 0 ? (vtCommunityVotes.harmless || 0) / total * 100 : 100;
-                            return (
-                              <div
-                                className="vt-community-fill"
-                                style={{ width: `${harmlessPct}%` }}
-                              />
-                            );
-                          })()}
-                        </div>
-                        <div className="vt-community-stats">
-                          <span>👍 {vtCommunityVotes.harmless || 0} harmless</span>
-                          <span>👎 {vtCommunityVotes.malicious || 0} malicious</span>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="empty-inline">
-                    {virustotal?.error || "No VirusTotal intelligence available."}
-                  </div>
-                )}
-
-              </div>
-
-            </section>
-
-            {/* ==================================================
-                AI REPORT
-            ================================================== */}
-
-            <section
-              ref={aiReportRef}
-              className="panel-section"
-            >
-
-              <div className="panel ai-panel">
-
-                <div className="panel-header">
-
-                  <div>
-
-                    <p className="eyebrow">
-                      08 / AI-ASSISTED ANALYSIS
-                    </p>
-
-                    <h3>
-                      Intelligence Assessment
-                    </h3>
-
-                    <p className="panel-description">
-                      Structured interpretation of the
-                      collected OSINT dataset.
-                    </p>
-
-                  </div>
-
-                  <div className="ai-report-actions">
 
                     <button
                       className="download-button"
                       onClick={
-                        downloadAIReportPDF
+                        handleDownloadSubdomains
                       }
-                      disabled={!aiReport}
+                      disabled={
+                        subdomains.length ===
+                        0
+                      }
                     >
-                      <Download size={15} />
-                      Export Report
+                      <Download
+                        size={15}
+                      />
+                      Export Inventory
                     </button>
 
-                    <div className="ai-badge">
+                  </div>
 
-                      <Brain size={15} />
+                  <div className="subdomain-summary">
+
+                    <div className="inventory-count">
+                      <strong>
+                        {subdomains.length}
+                      </strong>
 
                       <span>
-                        Ollama
+                        discovered
+                        subdomains
                       </span>
+                    </div>
 
+                    <div className="inventory-note">
+                      <Layers3
+                        size={14}
+                      />
+
+                      Graph visualization:
+
+                      <strong>
+                        first 5
+                      </strong>
                     </div>
 
                   </div>
+
+                  {subdomains.length >
+                  0 ? (
+                    <div className="subdomain-table-wrapper">
+
+                      <table className="subdomain-table">
+
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>
+                              Subdomain
+                            </th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+
+                          {subdomains.map(
+                            (
+                              subdomain,
+                              index
+                            ) => (
+                              <tr
+                                key={`${subdomain}-${index}`}
+                              >
+                                <td>
+                                  {String(
+                                    index +
+                                      1
+                                  ).padStart(
+                                    4,
+                                    "0"
+                                  )}
+                                </td>
+
+                                <td>
+                                  {
+                                    subdomain
+                                  }
+                                </td>
+                              </tr>
+                            )
+                          )}
+
+                        </tbody>
+
+                      </table>
+
+                    </div>
+                  ) : (
+                    <div className="empty-inline">
+                      No subdomains
+                      discovered.
+                    </div>
+                  )}
 
                 </div>
 
-                <div className="report">
+              </section>
 
-                  <div className="report-meta">
+              {/* ==============================================
+                  CERTIFICATES
+              ============================================== */}
+
+              <section
+                ref={
+                  certificatesRef
+                }
+                className="panel-section"
+              >
+
+                <div className="panel">
+
+                  <div className="panel-header">
 
                     <div>
+                      <p className="eyebrow">
+                        05 / TLS
+                        INTELLIGENCE
+                      </p>
 
-                      <span>
-                        TARGET
-                      </span>
+                      <h3>
+                        Certificate
+                        Inventory
+                      </h3>
 
-                      <strong>
-                        {analysis.domain}
-                      </strong>
-
+                      <p className="panel-description">
+                        Certificate
+                        identifiers
+                        observed during
+                        OSINT collection.
+                      </p>
                     </div>
 
-                    <div>
-
-                      <span>
-                        ANALYSIS ENGINE
-                      </span>
-
-                      <strong>
-                        Ollama
-                      </strong>
-
-                    </div>
-
-                    <div>
-
-                      <span>
-                        STATUS
-                      </span>
-
-                      <strong>
-                        {aiReport
-                          ? "Generated"
-                          : "Unavailable"}
-                      </strong>
-
+                    <div className="panel-icon">
+                      <FileKey
+                        size={20}
+                      />
                     </div>
 
                   </div>
 
-                  <div className="report-content">
+                  <div className="certificate-grid">
 
-                    {aiReport ? (
+                    {certificates.length >
+                    0 ? (
+                      certificates.map(
+                        (
+                          certificate,
+                          index
+                        ) => (
+                          <div
+                            className="certificate-card"
+                            key={`${certificate}-${index}`}
+                          >
+                            <div className="certificate-index">
+                              {String(
+                                index +
+                                  1
+                              ).padStart(
+                                2,
+                                "0"
+                              )}
+                            </div>
 
-                      aiReport
-                        .split("\n")
-                        .map(
-                          (
-                            line,
-                            index
-                          ) => {
+                            <div>
+                              <span>
+                                CERTIFICATE
+                              </span>
 
-                            const trimmed =
-                              line.trim();
-
-                            if (!trimmed) {
-                              return (
-                                <div
-                                  key={index}
-                                  className="report-spacer"
-                                />
-                              );
-                            }
-
-                            if (
-                              trimmed.startsWith(
-                                "**"
-                              ) &&
-                              trimmed.endsWith(
-                                "**"
-                              )
-                            ) {
-                              return (
-                                <h4
-                                  key={index}
-                                >
-                                  {trimmed.replace(
-                                    /\*\*/g,
-                                    ""
-                                  )}
-                                </h4>
-                              );
-                            }
-
-                            if (
-                              trimmed.startsWith(
-                                "- "
-                              ) ||
-                              trimmed.startsWith(
-                                "* "
-                              )
-                            ) {
-                              return (
-                                <p
-                                  key={index}
-                                  className="report-bullet"
-                                >
-                                  <span>
-                                    •
-                                  </span>
-
-                                  {trimmed.substring(
-                                    2
-                                  )}
-                                </p>
-                              );
-                            }
-
-                            return (
-                              <p
-                                key={index}
-                              >
-                                {trimmed}
-                              </p>
-                            );
-                          }
+                              <strong>
+                                {
+                                  certificate
+                                }
+                              </strong>
+                            </div>
+                          </div>
                         )
-
+                      )
                     ) : (
-
-                      <p>
-                        No AI report was
-                        generated.
-                      </p>
-
+                      <div className="empty-inline">
+                        No certificate
+                        data available.
+                      </div>
                     )}
 
                   </div>
 
-                  <div className="limitation">
+                </div>
 
-                    <Shield size={17} />
+              </section>
+
+              {/* ==============================================
+                  PORT SCAN
+              ============================================== */}
+
+              <section
+                ref={portsRef}
+                className="panel-section"
+              >
+
+                <div className="panel port-scan-panel">
+
+                  <div className="panel-header">
 
                     <div>
+                      <p className="eyebrow">
+                        06 / NETWORK
+                        SCAN
+                      </p>
 
-                      <strong>
-                        Analytical Limitation
-                      </strong>
+                      <h3>
+                        Port Scan Results
+                      </h3>
 
-                      <span>
-                        This report reflects
-                        only the collected OSINT
-                        data and does not establish
-                        ownership, maliciousness,
-                        benignness, or security
-                        posture.
-                      </span>
+                      <p className="panel-description">
+                        TCP port scanning
+                        results for
+                        discovered IP
+                        addresses with
+                        service detection.
+                      </p>
+                    </div>
+
+                    <div className="panel-icon">
+                      <Plug
+                        size={20}
+                      />
+                    </div>
+
+                  </div>
+
+                  <PortScanResults
+                    portScanData={
+                      portScanData
+                    }
+                  />
+
+                </div>
+
+              </section>
+
+              {/* ==============================================
+                  PATTERNS
+              ============================================== */}
+
+              <section className="panel-section">
+
+                <div className="panel">
+
+                  <div className="panel-header">
+
+                    <div>
+                      <p className="eyebrow">
+                        07 / PATTERN
+                        ANALYSIS
+                      </p>
+
+                      <h3>
+                        Subdomain
+                        Patterns
+                      </h3>
+
+                      <p className="panel-description">
+                        Structural
+                        characteristics
+                        observed across
+                        the discovered
+                        subdomain set.
+                      </p>
+                    </div>
+
+                    <div className="panel-icon">
+                      <Globe
+                        size={20}
+                      />
+                    </div>
+
+                  </div>
+
+                  <div className="pattern-grid">
+
+                    <PatternCard
+                      value={
+                        patterns.numeric_leading ??
+                        0
+                      }
+                      label="Numeric-leading"
+                    />
+
+                    <PatternCard
+                      value={
+                        patterns.contains_hyphen ??
+                        0
+                      }
+                      label="Contains hyphen"
+                    />
+
+                    <PatternCard
+                      value={
+                        patterns.multi_level ??
+                        0
+                      }
+                      label="Multi-level"
+                    />
+
+                    <PatternCard
+                      value={
+                        patterns
+                          .common_prefixes?.[0]
+                          ?.count || 0
+                      }
+                      label={
+                        patterns
+                          .common_prefixes?.[0]
+                          ? `${patterns.common_prefixes[0].prefix} prefix`
+                          : "Common prefix"
+                      }
+                    />
+
+                  </div>
+
+                </div>
+
+              </section>
+
+              {/* ==============================================
+                  VIRUSTOTAL
+              ============================================== */}
+
+              <section
+                ref={
+                  virustotalRef
+                }
+                className="panel-section"
+              >
+
+                <div className="panel">
+
+                  <div className="panel-header">
+
+                    <div>
+                      <p className="eyebrow">
+                        08 / EXTERNAL
+                        INTELLIGENCE
+                      </p>
+
+                      <h3>
+                        VirusTotal
+                        Analysis
+                      </h3>
+
+                      <p className="panel-description">
+                        Comprehensive
+                        threat intelligence
+                        from VirusTotal.
+                      </p>
+                    </div>
+
+                    <div className="panel-icon">
+                      <Shield
+                        size={20}
+                      />
+                    </div>
+
+                  </div>
+
+                  {virustotal &&
+                  typeof virustotal ===
+                    "object" &&
+                  !virustotal.error ? (
+                    <>
+
+                      <div className="vt-risk-section">
+
+                        <div
+                          className={`vt-risk-score ${
+                            vtRiskScore >=
+                            70
+                              ? "critical"
+                              : vtRiskScore >=
+                                40
+                              ? "high"
+                              : vtRiskScore >=
+                                20
+                              ? "medium"
+                              : "low"
+                          }`}
+                        >
+
+                          <div className="vt-risk-number">
+                            {
+                              vtRiskScore
+                            }
+                            <span>
+                              /100
+                            </span>
+                          </div>
+
+                          <div className="vt-risk-label">
+                            Risk Score
+                          </div>
+
+                          <div className="vt-risk-level">
+                            {vtRiskScore >=
+                            70
+                              ? "CRITICAL"
+                              : vtRiskScore >=
+                                40
+                              ? "HIGH"
+                              : vtRiskScore >=
+                                20
+                              ? "MEDIUM"
+                              : "LOW"}
+                          </div>
+
+                        </div>
+
+                        <div className="vt-stats-grid">
+
+                          <VTStat
+                            label="Malicious"
+                            value={
+                              vtSecuritySummary.malicious ||
+                              0
+                            }
+                            className="malicious"
+                          />
+
+                          <VTStat
+                            label="Suspicious"
+                            value={
+                              vtSecuritySummary.suspicious ||
+                              0
+                            }
+                            className="suspicious"
+                          />
+
+                          <VTStat
+                            label="Harmless"
+                            value={
+                              vtSecuritySummary.harmless ||
+                              0
+                            }
+                            className="harmless"
+                          />
+
+                          <VTStat
+                            label="Undetected"
+                            value={
+                              vtSecuritySummary.undetected ||
+                              0
+                            }
+                            className="undetected"
+                          />
+
+                          <VTStat
+                            label="Vendors"
+                            value={
+                              vtSecuritySummary.total_vendors ||
+                              0
+                            }
+                          />
+
+                        </div>
+
+                      </div>
+
+                      {vtRiskFactors.length >
+                        0 && (
+                        <div className="vt-risk-factors">
+
+                          <h4>
+                            ⚠️ Risk Factors
+                          </h4>
+
+                          {vtRiskFactors.map(
+                            (
+                              factor,
+                              index
+                            ) => {
+                              const severity =
+                                factor?.severity ||
+                                "low";
+
+                              return (
+                                <div
+                                  key={
+                                    index
+                                  }
+                                  className={`vt-risk-factor ${severity}`}
+                                >
+
+                                  <div className="vt-factor-header">
+
+                                    <span
+                                      className={`vt-factor-badge ${severity}`}
+                                    >
+                                      {severity.toUpperCase()}
+                                    </span>
+
+                                    <span className="vt-factor-description">
+                                      {
+                                        factor?.description
+                                      }
+                                    </span>
+
+                                  </div>
+
+                                  {Array.isArray(
+                                    factor?.details
+                                  ) &&
+                                    factor.details
+                                      .length >
+                                      0 && (
+                                      <ul className="vt-factor-details">
+
+                                        {factor.details.map(
+                                          (
+                                            detail,
+                                            i
+                                          ) => (
+                                            <li
+                                              key={
+                                                i
+                                              }
+                                            >
+                                              {
+                                                detail
+                                              }
+                                            </li>
+                                          )
+                                        )}
+
+                                      </ul>
+                                    )}
+
+                                </div>
+                              );
+                            }
+                          )}
+
+                        </div>
+                      )}
+
+                      {vtVendorBreakdown.length >
+                        0 && (
+                        <div className="vt-vendors">
+
+                          <h4>
+                            Security Vendor
+                            Analysis
+                          </h4>
+
+                          <div className="vt-vendor-grid">
+
+                            {vtVendorBreakdown
+                              .filter(
+                                (
+                                  vendor
+                                ) =>
+                                  vendor?.status ===
+                                    "malicious" ||
+                                  vendor?.status ===
+                                    "suspicious"
+                              )
+                              .slice(
+                                0,
+                                10
+                              )
+                              .map(
+                                (
+                                  vendor,
+                                  index
+                                ) => (
+                                  <div
+                                    key={
+                                      index
+                                    }
+                                    className={`vt-vendor-item ${vendor.status}`}
+                                  >
+
+                                    <span className="vt-vendor-name">
+                                      {
+                                        vendor.vendor
+                                      }
+                                    </span>
+
+                                    <span
+                                      className={`vt-vendor-status ${vendor.status}`}
+                                    >
+                                      {
+                                        vendor.status
+                                      }
+                                    </span>
+
+                                    <span className="vt-vendor-result">
+                                      {
+                                        vendor.result
+                                      }
+                                    </span>
+
+                                  </div>
+                                )
+                              )}
+
+                          </div>
+
+                          {vtVendorBreakdown.filter(
+                            (vendor) =>
+                              vendor?.status ===
+                                "malicious" ||
+                              vendor?.status ===
+                                "suspicious"
+                          ).length >
+                            10 && (
+                            <div className="vt-vendor-more">
+                              +
+                              {vtVendorBreakdown.filter(
+                                (
+                                  vendor
+                                ) =>
+                                  vendor?.status ===
+                                    "malicious" ||
+                                  vendor?.status ===
+                                    "suspicious"
+                              ).length -
+                                10}{" "}
+                              more vendors
+                            </div>
+                          )}
+
+                        </div>
+                      )}
+
+                      {vtWhois &&
+                        (vtWhois.registrar ||
+                          vtWhois.creation_date) && (
+                          <div className="vt-whois">
+
+                            <h4>
+                              WHOIS Information
+                            </h4>
+
+                            <div className="vt-whois-grid">
+
+                              {vtWhois.registrar && (
+                                <div className="vt-whois-item">
+                                  <span>
+                                    Registrar
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      vtWhois.registrar
+                                    }
+                                  </strong>
+                                </div>
+                              )}
+
+                              {vtWhois.creation_date && (
+                                <div className="vt-whois-item">
+                                  <span>
+                                    Creation Date
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      vtWhois.creation_date
+                                    }
+                                  </strong>
+                                </div>
+                              )}
+
+                              {vtWhois.expiration_date && (
+                                <div className="vt-whois-item">
+                                  <span>
+                                    Expiration Date
+                                  </span>
+
+                                  <strong>
+                                    {
+                                      vtWhois.expiration_date
+                                    }
+                                  </strong>
+                                </div>
+                              )}
+
+                            </div>
+
+                          </div>
+                        )}
+
+                      {vtCommunityVotes &&
+                        (vtCommunityVotes.harmless !==
+                          undefined ||
+                          vtCommunityVotes.malicious !==
+                            undefined) && (
+                          <div className="vt-community">
+
+                            <h4>
+                              Community Trust
+                            </h4>
+
+                            {(() => {
+                              const harmless =
+                                Number(
+                                  vtCommunityVotes.harmless
+                                ) ||
+                                0;
+
+                              const malicious =
+                                Number(
+                                  vtCommunityVotes.malicious
+                                ) ||
+                                0;
+
+                              const total =
+                                harmless +
+                                malicious;
+
+                              const harmlessPct =
+                                total >
+                                0
+                                  ? (harmless /
+                                      total) *
+                                    100
+                                  : 100;
+
+                              return (
+                                <>
+                                  <div className="vt-community-bar">
+                                    <div
+                                      className="vt-community-fill"
+                                      style={{
+                                        width: `${harmlessPct}%`,
+                                      }}
+                                    />
+                                  </div>
+
+                                  <div className="vt-community-stats">
+                                    <span>
+                                      👍{" "}
+                                      {
+                                        harmless
+                                      }{" "}
+                                      harmless
+                                    </span>
+
+                                    <span>
+                                      👎{" "}
+                                      {
+                                        malicious
+                                      }{" "}
+                                      malicious
+                                    </span>
+                                  </div>
+                                </>
+                              );
+                            })()}
+
+                          </div>
+                        )}
+
+                    </>
+                  ) : (
+                    <div className="empty-inline">
+                      {virustotal?.error ||
+                        "No VirusTotal intelligence available."}
+                    </div>
+                  )}
+
+                </div>
+
+              </section>
+
+              {/* ==============================================
+                  AI REPORT
+              ============================================== */}
+
+              <section
+                ref={
+                  aiReportRef
+                }
+                className="panel-section"
+              >
+
+                <div className="panel ai-panel">
+
+                  <div className="panel-header">
+
+                    <div>
+                      <p className="eyebrow">
+                        09 / AI-ASSISTED
+                        ANALYSIS
+                      </p>
+
+                      <h3>
+                        Intelligence
+                        Assessment
+                      </h3>
+
+                      <p className="panel-description">
+                        Structured
+                        interpretation of
+                        the collected OSINT
+                        dataset.
+                      </p>
+                    </div>
+
+                    <div className="ai-report-actions">
+
+                      <button
+                        className="download-button"
+                        onClick={
+                          handleDownloadAIReport
+                        }
+                        disabled={
+                          !aiReport
+                        }
+                      >
+                        <Download
+                          size={15}
+                        />
+                        Export Report
+                      </button>
+
+                      <div className="ai-badge">
+                        <Brain
+                          size={15}
+                        />
+
+                        <span>
+                          Ollama
+                        </span>
+                      </div>
+
+                    </div>
+
+                  </div>
+
+                  <div className="report">
+
+                    <div className="report-meta">
+
+                      <div>
+                        <span>
+                          TARGET
+                        </span>
+
+                        <strong>
+                          {
+                            analysis.domain
+                          }
+                        </strong>
+                      </div>
+
+                      <div>
+                        <span>
+                          ANALYSIS ENGINE
+                        </span>
+
+                        <strong>
+                          Ollama
+                        </strong>
+                      </div>
+
+                      <div>
+                        <span>
+                          STATUS
+                        </span>
+
+                        <strong>
+                          {aiReport
+                            ? "Generated"
+                            : "Unavailable"}
+                        </strong>
+                      </div>
+
+                    </div>
+
+                    <div className="report-content">
+
+                      {aiReport ? (
+                        aiReport
+                          .split("\n")
+                          .map(
+                            (
+                              line,
+                              index
+                            ) => {
+                              const trimmed =
+                                line.trim();
+
+                              if (
+                                !trimmed
+                              ) {
+                                return (
+                                  <div
+                                    key={
+                                      index
+                                    }
+                                    className="report-spacer"
+                                  />
+                                );
+                              }
+
+                              if (
+                                trimmed.startsWith(
+                                  "**"
+                                ) &&
+                                trimmed.endsWith(
+                                  "**"
+                                )
+                              ) {
+                                return (
+                                  <h4
+                                    key={
+                                      index
+                                    }
+                                  >
+                                    {trimmed.replace(
+                                      /\*\*/g,
+                                      ""
+                                    )}
+                                  </h4>
+                                );
+                              }
+
+                              if (
+                                trimmed.startsWith(
+                                  "- "
+                                ) ||
+                                trimmed.startsWith(
+                                  "* "
+                                )
+                              ) {
+                                return (
+                                  <p
+                                    key={
+                                      index
+                                    }
+                                    className="report-bullet"
+                                  >
+                                    <span>
+                                      •
+                                    </span>
+
+                                    {trimmed.substring(
+                                      2
+                                    )}
+                                  </p>
+                                );
+                              }
+
+                              return (
+                                <p
+                                  key={
+                                    index
+                                  }
+                                >
+                                  {trimmed}
+                                </p>
+                              );
+                            }
+                          )
+                      ) : (
+                        <p>
+                          No AI report
+                          was generated.
+                        </p>
+                      )}
+
+                    </div>
+
+                    <div className="limitation">
+
+                      <Shield
+                        size={17}
+                      />
+
+                      <div>
+                        <strong>
+                          Analytical
+                          Limitation
+                        </strong>
+
+                        <span>
+                          This report
+                          reflects only
+                          the collected
+                          OSINT data and
+                          does not
+                          establish
+                          ownership,
+                          maliciousness,
+                          benignness, or
+                          security
+                          posture.
+                        </span>
+                      </div>
 
                     </div>
 
@@ -2532,207 +3175,102 @@ function App() {
 
                 </div>
 
-              </div>
+              </section>
 
-            </section>
+              {/* ==============================================
+                  FOOTER
+              ============================================== */}
 
-            {/* ==================================================
-                FOOTER
-            ================================================== */}
+              <footer className="dashboard-footer">
 
-            <footer className="dashboard-footer">
+                <div>
+                  <strong>
+                    DomainAtlas
+                  </strong>
 
-              <div>
+                  <span>
+                    Domain-Centric OSINT
+                    Intelligence Platform
+                  </span>
+                </div>
 
-                <strong>
-                  DomainAtlas
-                </strong>
+                <div>
+                  <span>
+                    Collection
+                  </span>
 
-                <span>
-                  Domain-Centric OSINT Intelligence Platform
-                </span>
+                  <span>•</span>
 
-              </div>
+                  <span>
+                    Correlation
+                  </span>
 
-              <div>
+                  <span>•</span>
 
-                <span>
-                  Collection
-                </span>
+                  <span>
+                    Graph Analysis
+                  </span>
 
-                <span>•</span>
+                  <span>•</span>
 
-                <span>
-                  Correlation
-                </span>
+                  <span>
+                    AI Assessment
+                  </span>
+                </div>
 
-                <span>•</span>
+              </footer>
 
-                <span>
-                  Graph Analysis
-                </span>
-
-                <span>•</span>
-
-                <span>
-                  AI Assessment
-                </span>
-
-              </div>
-
-            </footer>
-
-          </>
-        )}
+            </>
+          )}
 
       </main>
-
     </div>
   );
 }
 
 // ================================================================
-// PIPELINE STEP - IMPROVED WITH REAL-TIME STATUS
+// NAV BUTTON
 // ================================================================
 
-function PipelineStep({
-  label,
-  message,
-  progress,
-  currentProgress,
-  status,
-  isCancelled,
-}) {
-  const isCancelledState = status === "cancelled" || isCancelled === true;
-  const isComplete = status === "completed" && !isCancelledState;
-  const isRunning = status === "running" && !isCancelledState;
-  const isActive = currentProgress >= progress && !isComplete && !isCancelledState;
-
-  // Show the actual progress value
-  const displayProgress = isComplete ? 100 : isRunning ? currentProgress : progress;
-
-  return (
-    <div className={`pipeline-step ${isComplete ? "completed" : isRunning ? "running" : isActive ? "active" : ""} ${isCancelledState ? "cancelled" : ""}`}>
-      <div className="pipeline-step-icon">
-        {isComplete ? (
-          <CheckCircle2 size={16} />
-        ) : isRunning ? (
-          <Loader2 size={16} className="spin" />
-        ) : isCancelledState ? (
-          <Square size={16} />
-        ) : (
-          <CircleDot size={16} />
-        )}
-      </div>
-
-      <div className="pipeline-step-content">
-        <strong>{label}</strong>
-        <span>
-          {isComplete ? "Complete" :
-            isRunning ? message :
-              isCancelledState ? "Cancelled" :
-                isActive ? "Processing..." :
-                  "Waiting"}
-        </span>
-      </div>
-
-      <div className="pipeline-step-progress">
-        {isCancelledState ? "✕" :
-          isComplete ? "✓" :
-            isRunning ? `${Math.round(currentProgress)}%` :
-              isActive ? `${Math.round(currentProgress)}%` :
-                `${progress}%`}
-      </div>
-    </div>
-  );
-}
-// ================================================================
-// STAT CARD
-// ================================================================
-
-function StatCard({
+function NavButton({
+  active,
   icon,
   label,
-  value,
-  description,
+  onClick,
 }) {
   return (
-    <div className="stat-card">
-
-      <div className="stat-card-top">
-
-        <div className="stat-icon">
-          {icon}
-        </div>
-
-      </div>
-
-      <div className="stat-content">
-
-        <p>
-          {label}
-        </p>
-
-        <strong>
-          {value}
-        </strong>
-
-        <span>
-          {description}
-        </span>
-
-      </div>
-
-    </div>
+    <button
+      className={`nav-item ${
+        active ? "active" : ""
+      }`}
+      onClick={onClick}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
   );
 }
 
 // ================================================================
-// INFO ROW
+// VIRUSTOTAL STAT
 // ================================================================
 
-function InfoRow({
+function VTStat({
   label,
   value,
+  className = "",
 }) {
   return (
-    <div className="info-row">
-
-      <div className="info-label">
-
-        <span className="info-marker" />
-
+    <div className="vt-stat">
+      <span className="vt-stat-label">
         {label}
-
-      </div>
-
-      <span className="info-value">
-        {value}
       </span>
 
-    </div>
-  );
-}
-
-// ================================================================
-// PATTERN CARD
-// ================================================================
-
-function PatternCard({
-  value,
-  label,
-}) {
-  return (
-    <div className="pattern-card">
-
-      <div className="pattern-value">
+      <span
+        className={`vt-stat-value ${className}`}
+      >
         {value}
-      </div>
-
-      <div className="pattern-label">
-        {label}
-      </div>
-
+      </span>
     </div>
   );
 }

@@ -1,8 +1,9 @@
+
 import json
 import os
 import hashlib
-
 from collections import defaultdict
+
 from neo4j import GraphDatabase
 
 
@@ -28,7 +29,10 @@ ALLOWED_ENTITY_TYPES = {
     "ASN",
     "Organization",
     "Certificate",
+    "Port",
+    "ServiceBanner",
 }
+
 
 ALLOWED_RELATIONSHIP_TYPES = {
     "HAS_SUBDOMAIN",
@@ -36,6 +40,8 @@ ALLOWED_RELATIONSHIP_TYPES = {
     "BELONGS_TO_ASN",
     "ASSOCIATED_WITH",
     "HAS_CERTIFICATE",
+    "HAS_OPEN_PORT",
+    "HAS_BANNER",
 }
 
 
@@ -44,9 +50,7 @@ ALLOWED_RELATIONSHIP_TYPES = {
 # ============================================================
 
 PROVENANCE_ENTITY_RELATIONSHIP = "OBSERVED"
-
 PROVENANCE_FROM_RELATIONSHIP = "OBSERVES_FROM"
-
 PROVENANCE_TO_RELATIONSHIP = "OBSERVES_TO"
 
 
@@ -54,7 +58,10 @@ PROVENANCE_TO_RELATIONSHIP = "OBSERVES_TO"
 # LOAD NORMALIZED DATA OBJECT
 # ============================================================
 
-def load_normalized_data_object(data, password):
+def load_normalized_data_object(
+    data,
+    password,
+):
     """
     Load normalized OSINT data into Neo4j.
 
@@ -80,8 +87,7 @@ def load_normalized_data_object(data, password):
               v
         Complete
 
-    Provenance is represented using Observation nodes rather
-    than being stored only as JSON properties.
+    Provenance is represented using Observation nodes.
     """
 
     domain = data.get("domain")
@@ -108,52 +114,66 @@ def load_normalized_data_object(data, password):
     )
     print("NEO4J GRAPH LOADING")
     print("============================================================")
-
-    print(f"[*] Target domain: {domain}")
+    print(
+        f"[*] Target domain: {domain}"
+    )
 
     driver = GraphDatabase.driver(
         NEO4J_URI,
-        auth=(NEO4J_USERNAME, password)
+        auth=(
+            NEO4J_USERNAME,
+            password,
+        ),
     )
 
     try:
 
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # VERIFY CONNECTION
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         driver.verify_connectivity()
 
-        print("[+] Neo4j connection established.")
+        print(
+            "[+] Neo4j connection established."
+        )
 
-        with driver.session(database="neo4j") as session:
+        with driver.session(
+            database="neo4j"
+        ) as session:
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # 1. CREATE CONSTRAINTS
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
-            print("[*] Checking Neo4j constraints...")
+            print(
+                "[*] Checking Neo4j constraints..."
+            )
 
-            create_constraints(session)
+            create_constraints(
+                session
+            )
 
-            print("[+] Constraints ready.")
+            print(
+                "[+] Constraints ready."
+            )
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # 2. CLEAR PREVIOUS DOMAIN GRAPH
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             clear_domain_graph(
                 session,
-                domain
+                domain,
             )
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # 3. CREATE ENTITIES
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             entities = data.get(
                 "entities",
-                []
+                [],
             )
 
             print(
@@ -162,16 +182,16 @@ def load_normalized_data_object(data, password):
 
             create_entities(
                 session,
-                entities
+                entities,
             )
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # 4. CREATE MAIN RELATIONSHIPS
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
             relationships = data.get(
                 "relationships",
-                []
+                [],
             )
 
             print(
@@ -180,34 +200,38 @@ def load_normalized_data_object(data, password):
 
             create_relationships(
                 session,
-                relationships
+                relationships,
             )
 
-            # ----------------------------------------------------
-            # 5. CREATE PROVENANCE OBSERVATIONS
-            # ----------------------------------------------------
+            # ------------------------------------------------
+            # 5. CREATE PROVENANCE
+            # ------------------------------------------------
 
-            print("[*] Loading provenance observations...")
+            print(
+                "[*] Loading provenance observations..."
+            )
 
             create_provenance_observations(
                 session,
                 entities,
-                relationships
+                relationships,
             )
 
-            # ----------------------------------------------------
+            # ------------------------------------------------
             # 6. VIRUSTOTAL
-            # ----------------------------------------------------
+            # ------------------------------------------------
 
-            print("[*] Adding VirusTotal intelligence...")
+            print(
+                "[*] Adding VirusTotal intelligence..."
+            )
 
             create_virustotal_properties(
                 session,
                 domain,
                 data.get(
                     "virustotal",
-                    {}
-                )
+                    {},
+                ),
             )
 
             print(
@@ -215,7 +239,6 @@ def load_normalized_data_object(data, password):
             )
 
     finally:
-
         driver.close()
 
 
@@ -223,7 +246,10 @@ def load_normalized_data_object(data, password):
 # FILE-BASED LOADER
 # ============================================================
 
-def load_normalized_data(file_path, password):
+def load_normalized_data(
+    file_path,
+    password,
+):
     """
     Load normalized JSON data from a file into Neo4j.
     """
@@ -231,14 +257,14 @@ def load_normalized_data(file_path, password):
     with open(
         file_path,
         "r",
-        encoding="utf-8"
+        encoding="utf-8",
     ) as file:
 
         data = json.load(file)
 
     load_normalized_data_object(
         data,
-        password
+        password,
     )
 
 
@@ -251,11 +277,9 @@ def create_constraints(session):
     Create uniqueness constraints for supported entity types.
 
     Entity identity:
-
         Entity Type + Entity Value
 
     Observation identity:
-
         observation_id
     """
 
@@ -298,10 +322,22 @@ def create_constraints(session):
         """,
 
         """
+        CREATE CONSTRAINT port_value_unique IF NOT EXISTS
+        FOR (n:Port)
+        REQUIRE n.value IS UNIQUE
+        """,
+
+        """
+        CREATE CONSTRAINT service_banner_value_unique IF NOT EXISTS
+        FOR (n:ServiceBanner)
+        REQUIRE n.value IS UNIQUE
+        """,
+
+        """
         CREATE CONSTRAINT observation_id_unique IF NOT EXISTS
         FOR (n:Observation)
         REQUIRE n.observation_id IS UNIQUE
-        """
+        """,
     ]
 
     for constraint in constraints:
@@ -315,21 +351,12 @@ def create_constraints(session):
 # CLEAR EXISTING DOMAIN GRAPH
 # ============================================================
 
-# ============================================================
-# CLEAR EXISTING DOMAIN GRAPH
-# ============================================================
-
-def clear_domain_graph(session, domain):
+def clear_domain_graph(
+    session,
+    domain,
+):
     """
     Safely remove the previous investigation graph for a domain.
-
-    This removes:
-
-        - Domain
-        - Provenance observations directly associated with the domain
-        - Its direct relationships
-        - Orphaned infrastructure nodes
-        - Orphaned provenance observations
 
     Shared infrastructure nodes are preserved if they are still
     connected to another investigation.
@@ -342,16 +369,11 @@ def clear_domain_graph(session, domain):
     # --------------------------------------------------------
     # STEP 1
     #
-    # Remove provenance observations associated with the
-    # target domain BEFORE deleting the domain relationships.
-    #
-    # This is important because relationship observations may
-    # also be connected to another entity such as an IP address.
-    # Therefore, simply deleting orphaned observations later
-    # would not remove them.
+    # Delete observations associated with this domain.
     # --------------------------------------------------------
 
     query_delete_domain_observations = """
+
     MATCH (d:Domain {value: $domain})
 
     OPTIONAL MATCH (o:Observation)-[:OBSERVED]->(d)
@@ -360,9 +382,13 @@ def clear_domain_graph(session, domain):
 
     OPTIONAL MATCH (o3:Observation)-[:OBSERVES_TO]->(d)
 
-    WITH collect(DISTINCT o)
-         + collect(DISTINCT o2)
-         + collect(DISTINCT o3) AS observations
+    WITH
+        collect(DISTINCT o)
+        +
+        collect(DISTINCT o2)
+        +
+        collect(DISTINCT o3)
+        AS observations
 
     UNWIND observations AS observation
 
@@ -371,28 +397,33 @@ def clear_domain_graph(session, domain):
     WHERE observation IS NOT NULL
 
     DETACH DELETE observation
+
     """
 
     session.run(
         query_delete_domain_observations,
-        domain=domain
+        domain=domain,
     ).consume()
 
     # --------------------------------------------------------
     # STEP 2
     #
-    # Remove all relationships from the target domain.
+    # Remove all outgoing relationships from target domain.
     # --------------------------------------------------------
 
     query_remove_domain_relationships = """
+
     MATCH (d:Domain {value: $domain})
+
     OPTIONAL MATCH (d)-[r]->()
+
     DELETE r
+
     """
 
     session.run(
         query_remove_domain_relationships,
-        domain=domain
+        domain=domain,
     ).consume()
 
     # --------------------------------------------------------
@@ -402,13 +433,16 @@ def clear_domain_graph(session, domain):
     # --------------------------------------------------------
 
     query_delete_domain = """
+
     MATCH (d:Domain {value: $domain})
+
     DETACH DELETE d
+
     """
 
     session.run(
         query_delete_domain,
-        domain=domain
+        domain=domain,
     ).consume()
 
     # --------------------------------------------------------
@@ -423,14 +457,20 @@ def clear_domain_graph(session, domain):
         "ASN",
         "Organization",
         "Certificate",
+        "Port",
+        "ServiceBanner",
     ]
 
     for label in orphan_labels:
 
         query = f"""
+
         MATCH (n:{label})
+
         WHERE NOT (n)--()
+
         DELETE n
+
         """
 
         session.run(
@@ -440,14 +480,17 @@ def clear_domain_graph(session, domain):
     # --------------------------------------------------------
     # STEP 5
     #
-    # Delete any Observation nodes that became orphaned
-    # after infrastructure cleanup.
+    # Delete orphaned observations.
     # --------------------------------------------------------
 
     query_delete_orphan_observations = """
+
     MATCH (o:Observation)
+
     WHERE NOT (o)--()
+
     DELETE o
+
     """
 
     session.run(
@@ -458,13 +501,14 @@ def clear_domain_graph(session, domain):
         f"[+] Previous graph for '{domain}' cleared safely."
     )
 
+
 # ============================================================
 # CHUNK HELPER
 # ============================================================
 
 def chunk_list(
     items,
-    batch_size=BATCH_SIZE
+    batch_size=BATCH_SIZE,
 ):
     """
     Yield lists of at most batch_size items.
@@ -473,7 +517,7 @@ def chunk_list(
     for index in range(
         0,
         len(items),
-        batch_size
+        batch_size,
     ):
 
         yield items[
@@ -485,20 +529,25 @@ def chunk_list(
 # CREATE ENTITIES
 # ============================================================
 
-def create_entities(session, entities):
+def create_entities(
+    session,
+    entities,
+):
     """
     Create entity nodes in batches.
 
-    Provenance is temporarily retained as a JSON property for
-    compatibility.
+    Entity properties are loaded from the normalized
+    properties object.
 
-    Actual graph-based provenance is created separately by
-    create_provenance_observations().
+    Provenance is retained as JSON for compatibility.
+    Graph-based provenance is created separately.
     """
 
     if not entities:
 
-        print("[!] No entities to load.")
+        print(
+            "[!] No entities to load."
+        )
 
         return
 
@@ -510,13 +559,18 @@ def create_entities(session, entities):
 
         if not isinstance(
             entity,
-            dict
+            dict,
         ):
             skipped += 1
             continue
 
-        entity_type = entity.get("type")
-        value = entity.get("value")
+        entity_type = entity.get(
+            "type"
+        )
+
+        value = entity.get(
+            "value"
+        )
 
         if (
             not entity_type
@@ -535,7 +589,9 @@ def create_entities(session, entities):
             skipped += 1
             continue
 
-        value = str(value).strip()
+        value = str(
+            value
+        ).strip()
 
         if not value:
             skipped += 1
@@ -543,20 +599,65 @@ def create_entities(session, entities):
 
         provenance = entity.get(
             "provenance",
-            []
+            [],
         )
+
+        if not isinstance(
+            provenance,
+            list,
+        ):
+            provenance = []
 
         provenance_json = json.dumps(
             provenance,
-            ensure_ascii=False
+            ensure_ascii=False,
         )
+
+        properties = entity.get(
+            "properties",
+            {},
+        )
+
+        if not isinstance(
+            properties,
+            dict,
+        ):
+            properties = {}
+
+        # ----------------------------------------------------
+        # Neo4j accepts primitive values and arrays of
+        # primitive values. We therefore filter properties
+        # to avoid passing dictionaries/lists accidentally.
+        # ----------------------------------------------------
+
+        clean_properties = {}
+
+        for prop_key, prop_value in properties.items():
+
+            if prop_value is None:
+                continue
+
+            if isinstance(
+                prop_value,
+                (
+                    str,
+                    int,
+                    float,
+                    bool,
+                ),
+            ):
+
+                clean_properties[
+                    prop_key
+                ] = prop_value
 
         grouped_entities[
             entity_type
         ].append(
             {
                 "value": value,
-                "provenance": provenance_json
+                "provenance": provenance_json,
+                "properties": clean_properties,
             }
         )
 
@@ -566,7 +667,10 @@ def create_entities(session, entities):
     # BATCH INSERT
     # --------------------------------------------------------
 
-    for entity_type, entity_list in grouped_entities.items():
+    for (
+        entity_type,
+        entity_list,
+    ) in grouped_entities.items():
 
         print(
             f"[*] Loading {len(entity_list)} "
@@ -574,30 +678,42 @@ def create_entities(session, entities):
         )
 
         query = f"""
+
         UNWIND $entities AS entity
 
         MERGE (n:{entity_type} {{
             value: entity.value
         }})
 
-        SET n.provenance = entity.provenance
+        SET
+            n.provenance = entity.provenance
+
+        SET n += entity.properties
+
         """
 
         batches = list(
-            chunk_list(entity_list)
+            chunk_list(
+                entity_list
+            )
         )
 
-        for batch_number, batch in enumerate(
+        for (
+            batch_number,
+            batch,
+        ) in enumerate(
             batches,
-            start=1
+            start=1,
         ):
 
             session.run(
                 query,
-                entities=batch
+                entities=batch,
             ).consume()
 
-            total_loaded += len(batch)
+            total_loaded += len(
+                batch
+            )
 
             if len(batches) > 1:
 
@@ -622,14 +738,19 @@ def create_entities(session, entities):
 # CREATE RELATIONSHIPS
 # ============================================================
 
-def create_relationships(session, relationships):
+def create_relationships(
+    session,
+    relationships,
+):
     """
     Create entity relationships in batches.
     """
 
     if not relationships:
 
-        print("[!] No relationships to load.")
+        print(
+            "[!] No relationships to load."
+        )
 
         return
 
@@ -641,7 +762,7 @@ def create_relationships(session, relationships):
 
         if not isinstance(
             relationship,
-            dict
+            dict,
         ):
             skipped += 1
             continue
@@ -660,17 +781,17 @@ def create_relationships(session, relationships):
 
         provenance = relationship.get(
             "provenance",
-            []
+            [],
         )
 
         if (
             not isinstance(
                 from_entity,
-                dict
+                dict,
             )
             or not isinstance(
                 to_entity,
-                dict
+                dict,
             )
             or not relationship_type
         ):
@@ -698,7 +819,7 @@ def create_relationships(session, relationships):
             from_type,
             from_value,
             to_type,
-            to_value
+            to_value,
         ]):
 
             skipped += 1
@@ -746,15 +867,53 @@ def create_relationships(session, relationships):
             skipped += 1
             continue
 
+        if not isinstance(
+            provenance,
+            list,
+        ):
+            provenance = []
+
         provenance_json = json.dumps(
             provenance,
-            ensure_ascii=False
+            ensure_ascii=False,
         )
+
+        properties = relationship.get(
+            "properties",
+            {},
+        )
+
+        if not isinstance(
+            properties,
+            dict,
+        ):
+            properties = {}
+
+        clean_properties = {}
+
+        for prop_key, prop_value in properties.items():
+
+            if prop_value is None:
+                continue
+
+            if isinstance(
+                prop_value,
+                (
+                    str,
+                    int,
+                    float,
+                    bool,
+                ),
+            ):
+
+                clean_properties[
+                    prop_key
+                ] = prop_value
 
         grouping_key = (
             from_type,
             to_type,
-            relationship_type
+            relationship_type,
         )
 
         grouped_relationships[
@@ -763,7 +922,8 @@ def create_relationships(session, relationships):
             {
                 "from_value": from_value,
                 "to_value": to_value,
-                "provenance": provenance_json
+                "provenance": provenance_json,
+                "properties": clean_properties,
             }
         )
 
@@ -776,7 +936,7 @@ def create_relationships(session, relationships):
     for (
         from_type,
         to_type,
-        relationship_type
+        relationship_type,
     ), relationship_list in grouped_relationships.items():
 
         print(
@@ -786,6 +946,7 @@ def create_relationships(session, relationships):
         )
 
         query = f"""
+
         UNWIND $relationships AS rel
 
         MATCH (a:{from_type} {{
@@ -798,7 +959,11 @@ def create_relationships(session, relationships):
 
         MERGE (a)-[r:{relationship_type}]->(b)
 
-        SET r.provenance = rel.provenance
+        SET
+            r.provenance = rel.provenance
+
+        SET r += rel.properties
+
         """
 
         batches = list(
@@ -807,17 +972,22 @@ def create_relationships(session, relationships):
             )
         )
 
-        for batch_number, batch in enumerate(
+        for (
+            batch_number,
+            batch,
+        ) in enumerate(
             batches,
-            start=1
+            start=1,
         ):
 
             session.run(
                 query,
-                relationships=batch
+                relationships=batch,
             ).consume()
 
-            total_loaded += len(batch)
+            total_loaded += len(
+                batch
+            )
 
             if len(batches) > 1:
 
@@ -853,7 +1023,7 @@ def generate_observation_id(
     from_value=None,
     relationship=None,
     to_type=None,
-    to_value=None
+    to_value=None,
 ):
     """
     Generate a deterministic identifier for an Observation.
@@ -873,7 +1043,7 @@ def generate_observation_id(
         str(from_value or ""),
         str(relationship or ""),
         str(to_type or ""),
-        str(to_value or "")
+        str(to_value or ""),
     ])
 
     return hashlib.sha256(
@@ -887,26 +1057,10 @@ def generate_observation_id(
 
 def create_entity_observations(
     session,
-    entities
+    entities,
 ):
     """
     Create Observation nodes for entity provenance.
-
-    Example:
-
-        Observation
-            |
-            | OBSERVED
-            v
-        Subdomain
-
-    Observation properties:
-
-        observation_id
-        observation_type
-        source
-        method
-        recorded_at
     """
 
     observations = []
@@ -915,7 +1069,7 @@ def create_entity_observations(
 
         if not isinstance(
             entity,
-            dict
+            dict,
         ):
             continue
 
@@ -929,13 +1083,16 @@ def create_entity_observations(
 
         provenance = entity.get(
             "provenance",
-            []
+            [],
         )
 
         if (
             entity_type not in ALLOWED_ENTITY_TYPES
             or not entity_value
-            or not isinstance(provenance, list)
+            or not isinstance(
+                provenance,
+                list,
+            )
         ):
             continue
 
@@ -947,7 +1104,7 @@ def create_entity_observations(
 
             if not isinstance(
                 item,
-                dict
+                dict,
             ):
                 continue
 
@@ -963,14 +1120,23 @@ def create_entity_observations(
                 "recorded_at"
             )
 
-            if not source:
-                source = "Unknown"
+            source = (
+                source
+                if source
+                else "Unknown"
+            )
 
-            if not method:
-                method = "Unknown"
+            method = (
+                method
+                if method
+                else "Unknown"
+            )
 
-            if not recorded_at:
-                recorded_at = "Unknown"
+            recorded_at = (
+                recorded_at
+                if recorded_at
+                else "Unknown"
+            )
 
             observation_id = generate_observation_id(
                 "ENTITY",
@@ -978,7 +1144,7 @@ def create_entity_observations(
                 method,
                 recorded_at,
                 entity_type=entity_type,
-                entity_value=entity_value
+                entity_value=entity_value,
             )
 
             observations.append(
@@ -989,20 +1155,28 @@ def create_entity_observations(
                     "method": str(method),
                     "recorded_at": str(recorded_at),
                     "entity_type": entity_type,
-                    "entity_value": entity_value
+                    "entity_value": entity_value,
                 }
             )
 
     if not observations:
-
         return 0
 
+    # IMPORTANT:
+    # Match using both entity type and value.
+    # This prevents a Port, IPAddress, Certificate, etc.
+    # from being confused when values happen to overlap.
+
     query = """
+
     UNWIND $observations AS observation
 
-    MATCH (e {
-        value: observation.entity_value
-    })
+    MATCH (e)
+
+    WHERE
+        any(label IN labels(e)
+            WHERE label = observation.entity_type)
+        AND e.value = observation.entity_value
 
     MERGE (o:Observation {
         observation_id: observation.observation_id
@@ -1012,9 +1186,11 @@ def create_entity_observations(
         o.observation_type = observation.observation_type,
         o.source = observation.source,
         o.method = observation.method,
-        o.recorded_at = observation.recorded_at
+        o.recorded_at = observation.recorded_at,
+        o.entity_type = observation.entity_type
 
     MERGE (o)-[:OBSERVED]->(e)
+
     """
 
     total = 0
@@ -1025,10 +1201,12 @@ def create_entity_observations(
 
         session.run(
             query,
-            observations=batch
+            observations=batch,
         ).consume()
 
-        total += len(batch)
+        total += len(
+            batch
+        )
 
     return total
 
@@ -1039,22 +1217,10 @@ def create_entity_observations(
 
 def create_relationship_observations(
     session,
-    relationships
+    relationships,
 ):
     """
     Create Observation nodes for relationship provenance.
-
-    Example:
-
-              Observation
-              /         \
-             /           \
-            v             v
-        Domain           IP
-
-        The Observation represents the evidence that supports:
-
-            Domain -[RESOLVES_TO]-> IP
     """
 
     observations = []
@@ -1063,7 +1229,7 @@ def create_relationship_observations(
 
         if not isinstance(
             relationship,
-            dict
+            dict,
         ):
             continue
 
@@ -1081,20 +1247,24 @@ def create_relationship_observations(
 
         provenance = relationship.get(
             "provenance",
-            []
+            [],
         )
 
         if (
             not isinstance(
                 from_entity,
-                dict
+                dict,
             )
             or not isinstance(
                 to_entity,
-                dict
+                dict,
             )
-            or relationship_type not in ALLOWED_RELATIONSHIP_TYPES
-            or not isinstance(provenance, list)
+            or relationship_type
+            not in ALLOWED_RELATIONSHIP_TYPES
+            or not isinstance(
+                provenance,
+                list,
+            )
         ):
             continue
 
@@ -1118,7 +1288,7 @@ def create_relationship_observations(
             from_type,
             from_value,
             to_type,
-            to_value
+            to_value,
         ]):
             continue
 
@@ -1126,7 +1296,7 @@ def create_relationship_observations(
 
             if not isinstance(
                 item,
-                dict
+                dict,
             ):
                 continue
 
@@ -1142,14 +1312,23 @@ def create_relationship_observations(
                 "recorded_at"
             )
 
-            if not source:
-                source = "Unknown"
+            source = (
+                source
+                if source
+                else "Unknown"
+            )
 
-            if not method:
-                method = "Unknown"
+            method = (
+                method
+                if method
+                else "Unknown"
+            )
 
-            if not recorded_at:
-                recorded_at = "Unknown"
+            recorded_at = (
+                recorded_at
+                if recorded_at
+                else "Unknown"
+            )
 
             observation_id = generate_observation_id(
                 "RELATIONSHIP",
@@ -1160,7 +1339,7 @@ def create_relationship_observations(
                 from_value=from_value,
                 relationship=relationship_type,
                 to_type=to_type,
-                to_value=to_value
+                to_value=to_value,
             )
 
             observations.append(
@@ -1170,37 +1349,38 @@ def create_relationship_observations(
                     "source": str(source),
                     "method": str(method),
                     "recorded_at": str(recorded_at),
-
                     "from_type": from_type,
-                    "from_value": str(from_value).strip(),
-
+                    "from_value": str(
+                        from_value
+                    ).strip(),
                     "relationship": relationship_type,
-
                     "to_type": to_type,
-                    "to_value": str(to_value).strip()
+                    "to_value": str(
+                        to_value
+                    ).strip(),
                 }
             )
 
     if not observations:
-
         return 0
 
-    # --------------------------------------------------------
-    # Relationship type is stored as a property on the
-    # Observation rather than dynamically creating a graph
-    # relationship from Observation.
-    # --------------------------------------------------------
-
     query = """
+
     UNWIND $observations AS observation
 
-    MATCH (a {
-        value: observation.from_value
-    })
+    MATCH (a)
 
-    MATCH (b {
-        value: observation.to_value
-    })
+    WHERE
+        any(label IN labels(a)
+            WHERE label = observation.from_type)
+        AND a.value = observation.from_value
+
+    MATCH (b)
+
+    WHERE
+        any(label IN labels(b)
+            WHERE label = observation.to_type)
+        AND b.value = observation.to_value
 
     MERGE (o:Observation {
         observation_id: observation.observation_id
@@ -1211,11 +1391,14 @@ def create_relationship_observations(
         o.source = observation.source,
         o.method = observation.method,
         o.recorded_at = observation.recorded_at,
-        o.relationship = observation.relationship
+        o.relationship = observation.relationship,
+        o.from_type = observation.from_type,
+        o.to_type = observation.to_type
 
     MERGE (o)-[:OBSERVES_FROM]->(a)
 
     MERGE (o)-[:OBSERVES_TO]->(b)
+
     """
 
     total = 0
@@ -1226,10 +1409,12 @@ def create_relationship_observations(
 
         session.run(
             query,
-            observations=batch
+            observations=batch,
         ).consume()
 
-        total += len(batch)
+        total += len(
+            batch
+        )
 
     return total
 
@@ -1241,16 +1426,17 @@ def create_relationship_observations(
 def create_provenance_observations(
     session,
     entities,
-    relationships
+    relationships,
 ):
     """
-    Create graph-based provenance for entities and relationships.
+    Create graph-based provenance for entities
+    and relationships.
     """
 
     entity_observation_count = (
         create_entity_observations(
             session,
-            entities
+            entities,
         )
     )
 
@@ -1262,7 +1448,7 @@ def create_provenance_observations(
     relationship_observation_count = (
         create_relationship_observations(
             session,
-            relationships
+            relationships,
         )
     )
 
@@ -1288,11 +1474,11 @@ def create_provenance_observations(
 def create_virustotal_properties(
     session,
     domain,
-    virustotal
+    virustotal,
 ):
     """
-    Store VirusTotal intelligence as properties on the
-    corresponding Domain node.
+    Store VirusTotal intelligence as properties on
+    the corresponding Domain node.
 
     Existing frontend / analysis compatibility is preserved.
     """
@@ -1302,7 +1488,7 @@ def create_virustotal_properties(
 
     if not isinstance(
         virustotal,
-        dict
+        dict,
     ):
         return
 
@@ -1321,14 +1507,13 @@ def create_virustotal_properties(
 
     analysis_stats = virustotal.get(
         "last_analysis_stats",
-        {}
+        {},
     )
 
     if not isinstance(
         analysis_stats,
-        dict
+        dict,
     ):
-
         analysis_stats = {}
 
     # --------------------------------------------------------
@@ -1337,14 +1522,13 @@ def create_virustotal_properties(
 
     categories = virustotal.get(
         "categories",
-        {}
+        {},
     )
 
     if not isinstance(
         categories,
-        dict
+        dict,
     ):
-
         categories = {}
 
     # --------------------------------------------------------
@@ -1353,14 +1537,13 @@ def create_virustotal_properties(
 
     dns_records = virustotal.get(
         "last_dns_records",
-        []
+        [],
     )
 
     if not isinstance(
         dns_records,
-        list
+        list,
     ):
-
         dns_records = []
 
     # --------------------------------------------------------
@@ -1369,14 +1552,13 @@ def create_virustotal_properties(
 
     popularity_ranks = virustotal.get(
         "popularity_ranks",
-        {}
+        {},
     )
 
     if not isinstance(
         popularity_ranks,
-        dict
+        dict,
     ):
-
         popularity_ranks = {}
 
     # --------------------------------------------------------
@@ -1385,17 +1567,17 @@ def create_virustotal_properties(
 
     categories_json = json.dumps(
         categories,
-        ensure_ascii=False
+        ensure_ascii=False,
     )
 
     dns_records_json = json.dumps(
         dns_records,
-        ensure_ascii=False
+        ensure_ascii=False,
     )
 
     popularity_ranks_json = json.dumps(
         popularity_ranks,
-        ensure_ascii=False
+        ensure_ascii=False,
     )
 
     # --------------------------------------------------------
@@ -1403,14 +1585,22 @@ def create_virustotal_properties(
     # --------------------------------------------------------
 
     query = """
-    MATCH (d:Domain {value: $domain})
+
+    MATCH (d:Domain {
+        value: $domain
+    })
 
     SET
         d.vt_reputation = $reputation,
+
         d.vt_malicious = $malicious,
+
         d.vt_suspicious = $suspicious,
+
         d.vt_harmless = $harmless,
+
         d.vt_undetected = $undetected,
+
         d.vt_timeout = $timeout,
 
         d.vt_categories = $categories,
@@ -1432,11 +1622,11 @@ def create_virustotal_properties(
         d.vt_method = $method,
 
         d.vt_recorded_at = $recorded_at
+
     """
 
     session.run(
         query,
-
         domain=domain,
 
         reputation=virustotal.get(
@@ -1445,27 +1635,27 @@ def create_virustotal_properties(
 
         malicious=analysis_stats.get(
             "malicious",
-            0
+            0,
         ),
 
         suspicious=analysis_stats.get(
             "suspicious",
-            0
+            0,
         ),
 
         harmless=analysis_stats.get(
             "harmless",
-            0
+            0,
         ),
 
         undetected=analysis_stats.get(
             "undetected",
-            0
+            0,
         ),
 
         timeout=analysis_stats.get(
             "timeout",
-            0
+            0,
         ),
 
         categories=categories_json,
@@ -1488,18 +1678,17 @@ def create_virustotal_properties(
 
         source=virustotal.get(
             "source",
-            "VirusTotal"
+            "VirusTotal",
         ),
 
         method=virustotal.get(
             "method",
-            "VirusTotal domain intelligence API"
+            "VirusTotal domain intelligence API",
         ),
 
         recorded_at=virustotal.get(
             "recorded_at"
-        )
-
+        ),
     ).consume()
 
     print(
@@ -1556,7 +1745,7 @@ if __name__ == "__main__":
 
             load_normalized_data(
                 file_path,
-                password
+                password,
             )
 
             print(

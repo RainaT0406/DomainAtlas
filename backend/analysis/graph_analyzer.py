@@ -22,11 +22,8 @@ def safe_json_load(value, default):
     Safely convert a JSON string stored in Neo4j back into
     a Python object.
 
-    Neo4j stores structured VirusTotal fields such as
-    categories, popularity ranks, and DNS records as
-    JSON strings.
+    Some VirusTotal fields are stored as JSON strings.
     """
-
     if value is None:
         return default
 
@@ -43,9 +40,8 @@ def classify_ip_version(ip):
     """
     Determine whether an IP address is IPv4 or IPv6.
     """
-
     try:
-        parsed_ip = ip_address(ip)
+        parsed_ip = ip_address(str(ip))
 
         if parsed_ip.version == 4:
             return "IPv4"
@@ -53,10 +49,378 @@ def classify_ip_version(ip):
         if parsed_ip.version == 6:
             return "IPv6"
 
-    except ValueError:
+    except (ValueError, TypeError):
         pass
 
     return "Unknown"
+
+
+def normalize_port(port):
+    """
+    Normalize a Neo4j port value.
+
+    Neo4j may return ports as integers or strings.
+    The analyzer uses strings consistently internally.
+    """
+    if port is None:
+        return None
+
+    value = str(port).strip()
+
+    if not value:
+        return None
+
+    return value
+
+
+def port_sort_key(port):
+    """
+    Sort numeric ports numerically while keeping non-numeric
+    values valid.
+    """
+    try:
+        return (0, int(port))
+    except (TypeError, ValueError):
+        return (1, str(port))
+
+
+def unique_preserve_order(values):
+    """
+    Remove duplicates while preserving original order.
+    """
+    seen = set()
+    result = []
+
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+
+    return result
+
+
+# ============================================================
+# PORT ANALYSIS HELPERS
+# ============================================================
+
+# These are conventional port/service associations.
+# They are NOT treated as proof that a service is running.
+COMMON_PORT_SERVICES = {
+    "20": "FTP-data",
+    "21": "FTP",
+    "22": "SSH",
+    "23": "Telnet",
+    "25": "SMTP",
+    "53": "DNS",
+    "80": "HTTP",
+    "110": "POP3",
+    "111": "RPCBind",
+    "135": "MS-RPC",
+    "139": "NetBIOS",
+    "143": "IMAP",
+    "443": "HTTPS",
+    "445": "SMB",
+    "465": "SMTPS",
+    "587": "SMTP submission",
+    "993": "IMAPS",
+    "995": "POP3S",
+    "1433": "Microsoft SQL Server",
+    "1521": "Oracle Database",
+    "2049": "NFS",
+    "2375": "Docker API",
+    "2376": "Docker API TLS",
+    "3000": "Common web application port",
+    "3306": "MySQL",
+    "3389": "RDP",
+    "5432": "PostgreSQL",
+    "5601": "Kibana",
+    "5900": "VNC",
+    "6379": "Redis",
+    "6443": "Kubernetes API",
+    "8080": "HTTP alternate",
+    "8443": "HTTPS alternate",
+    "9200": "Elasticsearch",
+    "27017": "MongoDB",
+}
+
+
+def analyze_port_distribution(open_ports_by_ip):
+    """
+    Produce deterministic statistics about observed open ports.
+
+    No security conclusion is made here.
+    """
+
+    all_ports = []
+
+    for ports in open_ports_by_ip.values():
+        for port in ports:
+            normalized = normalize_port(port)
+
+            if normalized is not None:
+                all_ports.append(normalized)
+
+    counter = Counter(all_ports)
+
+    unique_ports = sorted(
+        counter.keys(),
+        key=port_sort_key
+    )
+
+    most_common = [
+        {
+            "port": port,
+            "count": count,
+            "conventional_service": COMMON_PORT_SERVICES.get(port)
+        }
+        for port, count in counter.most_common(10)
+    ]
+
+    conventional_services = []
+
+    for port in unique_ports:
+        service = COMMON_PORT_SERVICES.get(port)
+
+        if service:
+            conventional_services.append(
+                {
+                    "port": port,
+                    "service": service,
+                    "observed_on_ips": counter[port]
+                }
+            )
+
+    ports_per_ip = {}
+
+    for ip, ports in open_ports_by_ip.items():
+        ports_per_ip[ip] = len(
+            unique_preserve_order(
+                normalize_port(port)
+                for port in ports
+                if normalize_port(port) is not None
+            )
+        )
+
+    return {
+        "unique_port_count": len(unique_ports),
+        "unique_ports": unique_ports,
+        "most_common_ports": most_common,
+        "conventional_services": conventional_services,
+        "ports_per_ip": ports_per_ip,
+        "max_ports_on_single_ip": (
+            max(ports_per_ip.values())
+            if ports_per_ip
+            else 0
+        ),
+        "average_ports_per_exposed_ip": (
+            round(
+                sum(ports_per_ip.values()) / len(ports_per_ip),
+                2
+            )
+            if ports_per_ip
+            else 0
+        )
+    }
+
+
+# ============================================================
+# SUBDOMAIN ANALYSIS
+# ============================================================
+
+def analyze_subdomain_structure(subdomains, domain):
+    """
+    Analyze naming and structural characteristics of observed
+    subdomains.
+
+    These are lexical observations only.
+    """
+
+    numeric_leading_count = 0
+    hyphen_count = 0
+    multi_level_count = 0
+
+    environment_count = 0
+    service_count = 0
+    wildcard_count = 0
+
+    environment_patterns = []
+    service_patterns = []
+    wildcard_patterns = []
+    numeric_patterns = []
+
+    prefix_counter = Counter()
+
+    normalized_domain = str(domain).lower().rstrip(".")
+
+    environment_regex = (
+        r"(^|[.-])(dev|development|test|testing|stage|staging|"
+        r"prod|production|qa|uat)([.-]|$)"
+    )
+
+    service_regex = (
+        r"(^|[.-])(api|app|web|cdn|static|media|assets|auth|"
+        r"login|mail|smtp|pop|imap|ftp|ssh|mysql|postgres|"
+        r"redis|mongo|elastic)([.-]|$)"
+    )
+
+    import re
+
+    for subdomain in subdomains:
+
+        if not subdomain:
+            continue
+
+        normalized = str(subdomain).lower().rstrip(".")
+
+        suffix = "." + normalized_domain
+
+        if normalized.endswith(suffix):
+            relative_name = normalized[:-len(suffix)]
+        else:
+            relative_name = normalized
+
+        if not relative_name:
+            continue
+
+        if relative_name[0].isdigit():
+            numeric_leading_count += 1
+            numeric_patterns.append(subdomain)
+
+        if "-" in relative_name:
+            hyphen_count += 1
+
+        if "." in relative_name:
+            multi_level_count += 1
+
+        first_label = relative_name.split(".")[0]
+
+        if first_label:
+            prefix_counter[first_label] += 1
+
+        if re.search(environment_regex, relative_name):
+            environment_count += 1
+            environment_patterns.append(subdomain)
+
+        if re.search(service_regex, relative_name):
+            service_count += 1
+            service_patterns.append(subdomain)
+
+        if relative_name.startswith("*."):
+            wildcard_count += 1
+            wildcard_patterns.append(subdomain)
+
+    total = len(subdomains)
+
+    return {
+        "numeric_leading": numeric_leading_count,
+        "contains_hyphen": hyphen_count,
+        "multi_level": multi_level_count,
+
+        "environment_related": environment_count,
+        "service_related": service_count,
+        "wildcard": wildcard_count,
+
+        "numeric_leading_percentage": (
+            round((numeric_leading_count / total) * 100, 2)
+            if total else 0
+        ),
+
+        "hyphen_percentage": (
+            round((hyphen_count / total) * 100, 2)
+            if total else 0
+        ),
+
+        "multi_level_percentage": (
+            round((multi_level_count / total) * 100, 2)
+            if total else 0
+        ),
+
+        "environment_patterns": environment_patterns[:100],
+        "service_patterns": service_patterns[:100],
+        "wildcard_patterns": wildcard_patterns[:100],
+        "numeric_patterns": numeric_patterns[:100],
+
+        "common_prefixes": [
+            {
+                "prefix": prefix,
+                "count": count
+            }
+            for prefix, count
+            in prefix_counter.most_common(10)
+        ]
+    }
+
+
+# ============================================================
+# INFRASTRUCTURE METRICS
+# ============================================================
+
+def calculate_infrastructure_metrics(
+    subdomains,
+    ip_addresses,
+    asns,
+    organizations,
+    certificates,
+    open_ports_by_ip
+):
+    """
+    Calculate deterministic infrastructure metrics.
+
+    These metrics describe the collected dataset. They do not
+    determine security, maliciousness, ownership, or compromise.
+    """
+
+    subdomain_count = len(subdomains)
+    ip_count = len(ip_addresses)
+    asn_count = len(asns)
+    organization_count = len(organizations)
+    certificate_count = len(certificates)
+
+    total_open_ports = sum(
+        len(ports)
+        for ports in open_ports_by_ip.values()
+    )
+
+    exposed_ip_count = len(open_ports_by_ip)
+
+    metrics = {
+        "subdomain_count": subdomain_count,
+        "ip_count": ip_count,
+        "asn_count": asn_count,
+        "organization_count": organization_count,
+        "certificate_count": certificate_count,
+
+        "total_open_ports": total_open_ports,
+        "ips_with_open_ports": exposed_ip_count,
+
+        "subdomains_per_ip": (
+            round(subdomain_count / ip_count, 2)
+            if ip_count else 0
+        ),
+
+        "ips_per_subdomain": (
+            round(ip_count / subdomain_count, 4)
+            if subdomain_count else 0
+        ),
+
+        "certificates_per_domain": certificate_count,
+
+        "asn_concentration": (
+            round(1 / asn_count, 4)
+            if asn_count == 1
+            else None
+        ),
+
+        "port_exposure_percentage": (
+            round(
+                (exposed_ip_count / ip_count) * 100,
+                2
+            )
+            if ip_count else 0
+        )
+    }
+
+    return metrics
 
 
 # ============================================================
@@ -74,6 +438,8 @@ def get_domain_graph(domain, password):
         "nodes": [...],
         "edges": [...]
     }
+
+    The domain node is always preserved when it exists.
     """
 
     driver = GraphDatabase.driver(
@@ -84,26 +450,29 @@ def get_domain_graph(domain, password):
     try:
         with driver.session(database="neo4j") as session:
 
+            # ------------------------------------------------
+            # Retrieve domain + related nodes
+            # ------------------------------------------------
+
             result = session.run(
                 """
                 MATCH (d:Domain {value: $domain})
+
                 OPTIONAL MATCH path = (d)-[*1..2]-(related)
 
-                WITH d, collect(path) AS paths
-
-                UNWIND paths AS path
-                UNWIND nodes(path) AS node
-
                 WITH d,
-                     collect(DISTINCT node) AS nodes,
-                     paths
+                     collect(DISTINCT d) +
+                     collect(DISTINCT related) AS raw_nodes,
+                     collect(path) AS paths
 
-                UNWIND paths AS path
-                UNWIND relationships(path) AS rel
+                UNWIND raw_nodes AS node
 
-                RETURN
-                    nodes,
-                    collect(DISTINCT rel) AS relationships
+                WITH
+                    collect(DISTINCT node) AS nodes,
+                    paths
+
+                RETURN nodes,
+                       paths
                 """,
                 domain=domain
             )
@@ -116,14 +485,17 @@ def get_domain_graph(domain, password):
                     "edges": []
                 }
 
-            nodes = []
-            edges = []
-
-            # ==================================================
+            # ------------------------------------------------
             # NODES
-            # ==================================================
+            # ------------------------------------------------
+
+            nodes = []
+            node_ids = set()
 
             for node in record["nodes"]:
+
+                if node is None:
+                    continue
 
                 labels = list(node.labels)
 
@@ -132,38 +504,93 @@ def get_domain_graph(domain, password):
 
                 node_type = labels[0]
                 node_id = str(node.element_id)
+
                 value = node.get("value", node_id)
 
-                nodes.append(
-                    {
-                        "data": {
-                            "id": node_id,
-                            "label": str(value),
-                            "type": node_type
-                        }
-                    }
-                )
+                node_data = {
+                    "id": node_id,
+                    "label": str(value),
+                    "type": node_type
+                }
 
-            # ==================================================
+                # Port-specific properties
+                if node_type == "Port":
+
+                    port_value = normalize_port(
+                        node.get("value")
+                    )
+
+                    if port_value:
+                        node_data["label"] = port_value
+
+                    service = node.get("service")
+
+                    if service:
+                        node_data["service"] = str(service)
+
+                    banner = node.get("banner")
+
+                    if banner:
+                        node_data["banner"] = str(banner)[:200]
+
+                # ServiceBanner properties
+                if node_type == "ServiceBanner":
+
+                    node_data["label"] = str(value)
+
+                nodes.append({
+                    "data": node_data
+                })
+
+                node_ids.add(node_id)
+
+            # ------------------------------------------------
             # EDGES
-            # ==================================================
+            # ------------------------------------------------
 
-            for relationship in record["relationships"]:
+            edges = []
+            edge_ids = set()
 
-                edges.append(
-                    {
-                        "data": {
-                            "id": str(relationship.element_id),
-                            "source": str(
-                                relationship.start_node.element_id
-                            ),
-                            "target": str(
-                                relationship.end_node.element_id
-                            ),
-                            "label": relationship.type
+            for path in record["paths"]:
+
+                if path is None:
+                    continue
+
+                for relationship in path.relationships:
+
+                    edge_id = str(relationship.element_id)
+
+                    if edge_id in edge_ids:
+                        continue
+
+                    start_id = str(
+                        relationship.start_node.element_id
+                    )
+
+                    target_id = str(
+                        relationship.end_node.element_id
+                    )
+
+                    # Only include relationships whose endpoints
+                    # are actually present in the node set.
+                    if (
+                        start_id not in node_ids
+                        or target_id not in node_ids
+                    ):
+                        continue
+
+                    edges.append(
+                        {
+                            "data": {
+                                "id": edge_id,
+                                "source": start_id,
+                                "target": target_id,
+                                "label": relationship.type
+                            }
                         }
-                    }
-                )
+                    )
+
+                    edge_ids.add(edge_id)
 
             return {
                 "nodes": nodes,
@@ -182,19 +609,8 @@ def get_domain_analysis(domain, password):
     """
     Analyze the Neo4j graph associated with a target domain.
 
-    The analysis includes:
-
-        - Domain information
-        - VirusTotal intelligence
-        - Subdomains
-        - IP addresses
-        - ASNs
-        - Organizations
-        - Certificates
-        - Relationship counts
-        - IPv4 / IPv6 distribution
-        - Subdomain patterns
-        - Graph-derived observations
+    The function performs deterministic analysis of collected
+    graph data. It does not perform external lookups.
 
     Returns a structured dictionary suitable for:
 
@@ -229,6 +645,8 @@ def get_domain_analysis(domain, password):
             if not record:
                 return None
 
+            domain_value = record["domain"]
+
             # ==================================================
             # 2. VIRUSTOTAL INTELLIGENCE
             # ==================================================
@@ -249,7 +667,8 @@ def get_domain_analysis(domain, password):
                     d.vt_timeout AS timeout,
                     d.vt_registrar AS registrar,
                     d.vt_creation_date AS creation_date,
-                    d.vt_last_modification_date AS last_modification_date,
+                    d.vt_last_modification_date
+                        AS last_modification_date,
                     d.vt_categories AS categories,
                     d.vt_popularity_ranks AS popularity_ranks,
                     d.vt_dns_records AS dns_records
@@ -299,12 +718,12 @@ def get_domain_analysis(domain, password):
                         "undetected": vt_record["undetected"],
                         "timeout": vt_record["timeout"],
                         "registrar": vt_record["registrar"],
-                        "creation_date": vt_record[
-                            "creation_date"
-                        ],
-                        "last_modification_date": vt_record[
-                            "last_modification_date"
-                        ],
+                        "creation_date":
+                            vt_record["creation_date"],
+                        "last_modification_date":
+                            vt_record[
+                                "last_modification_date"
+                            ],
                         "categories": safe_json_load(
                             vt_record["categories"],
                             {}
@@ -364,7 +783,169 @@ def get_domain_analysis(domain, password):
             ]
 
             # ==================================================
-            # 5. ASNs
+            # 5. PORT SCAN RESULTS
+            # ==================================================
+
+            open_ports_by_ip = {}
+            port_banners = {}
+
+            # IMPORTANT:
+            # Only ports connected to this domain's observed IPs
+            # are retrieved.
+
+            if ip_addresses:
+
+                result = session.run(
+                    """
+                    MATCH (d:Domain {value: $domain})
+                          -[:RESOLVES_TO]->
+                          (ip:IPAddress)
+                          -[:HAS_OPEN_PORT]->
+                          (p:Port)
+
+                    RETURN DISTINCT
+                        ip.value AS ip,
+                        p.value AS port
+
+                    ORDER BY ip, port
+                    """,
+                    domain=domain
+                )
+
+                for record in result:
+
+                    ip = record["ip"]
+                    port = normalize_port(
+                        record["port"]
+                    )
+
+                    if not ip or port is None:
+                        continue
+
+                    open_ports_by_ip.setdefault(
+                        ip,
+                        []
+                    ).append(port)
+
+                # Remove duplicates and sort ports.
+                for ip, ports in open_ports_by_ip.items():
+
+                    open_ports_by_ip[ip] = sorted(
+                        unique_preserve_order(ports),
+                        key=port_sort_key
+                    )
+
+                # ----------------------------------------------
+                # Domain-scoped banners
+                # ----------------------------------------------
+
+                try:
+
+                    result = session.run(
+                        """
+                        MATCH (d:Domain {value: $domain})
+                              -[:RESOLVES_TO]->
+                              (ip:IPAddress)
+                              -[:HAS_OPEN_PORT]->
+                              (p:Port)
+                              -[:HAS_BANNER]->
+                              (b:ServiceBanner)
+
+                        RETURN DISTINCT
+                            ip.value AS ip,
+                            p.value AS port,
+                            b.value AS banner
+                        """,
+                        domain=domain
+                    )
+
+                    for record in result:
+
+                        ip = record["ip"]
+                        port = normalize_port(
+                            record["port"]
+                        )
+                        banner = record["banner"]
+
+                        if (
+                            not ip
+                            or port is None
+                            or banner is None
+                        ):
+                            continue
+
+                        port_banners.setdefault(
+                            ip,
+                            {}
+                        ).setdefault(
+                            port,
+                            []
+                        ).append(
+                            str(banner)
+                        )
+
+                except Exception:
+                    # Banner data is supplementary.
+                    # A missing banner must not break the
+                    # main port analysis.
+                    port_banners = {}
+
+            port_distribution = analyze_port_distribution(
+                open_ports_by_ip
+            )
+
+            port_scan_results = {
+                "ip_count": len(open_ports_by_ip),
+
+                "total_open_ports": sum(
+                    len(ports)
+                    for ports in open_ports_by_ip.values()
+                ),
+
+                "open_ports_by_ip":
+                    open_ports_by_ip,
+
+                "port_banners":
+                    port_banners,
+
+                "unique_port_count":
+                    port_distribution[
+                        "unique_port_count"
+                    ],
+
+                "unique_ports":
+                    port_distribution[
+                        "unique_ports"
+                    ],
+
+                "most_common_ports":
+                    port_distribution[
+                        "most_common_ports"
+                    ],
+
+                "conventional_services":
+                    port_distribution[
+                        "conventional_services"
+                    ],
+
+                "ports_per_ip":
+                    port_distribution[
+                        "ports_per_ip"
+                    ],
+
+                "max_ports_on_single_ip":
+                    port_distribution[
+                        "max_ports_on_single_ip"
+                    ],
+
+                "average_ports_per_exposed_ip":
+                    port_distribution[
+                        "average_ports_per_exposed_ip"
+                    ]
+            }
+
+            # ==================================================
+            # 6. ASNs
             # ==================================================
 
             result = session.run(
@@ -388,7 +969,7 @@ def get_domain_analysis(domain, password):
             ]
 
             # ==================================================
-            # 6. ORGANIZATIONS
+            # 7. ORGANIZATIONS
             # ==================================================
 
             result = session.run(
@@ -412,7 +993,7 @@ def get_domain_analysis(domain, password):
             ]
 
             # ==================================================
-            # 7. CERTIFICATES
+            # 8. CERTIFICATES
             # ==================================================
 
             result = session.run(
@@ -434,7 +1015,7 @@ def get_domain_analysis(domain, password):
             ]
 
             # ==================================================
-            # 8. RELATIONSHIP COUNTS
+            # 9. RELATIONSHIP COUNTS
             # ==================================================
 
             relationship_counts = {}
@@ -483,10 +1064,22 @@ def get_domain_analysis(domain, password):
                           (:Certificate)
 
                     RETURN count(r) AS count
+                """,
+
+                "HAS_OPEN_PORT": """
+                    MATCH (d:Domain {value: $domain})
+                          -[:RESOLVES_TO]->
+                          (ip:IPAddress)
+                          -[r:HAS_OPEN_PORT]->
+                          (:Port)
+
+                    RETURN count(r) AS count
                 """
             }
 
-            for relationship_type, query in relationship_queries.items():
+            for relationship_type, query in (
+                relationship_queries.items()
+            ):
 
                 result = session.run(
                     query,
@@ -495,14 +1088,16 @@ def get_domain_analysis(domain, password):
 
                 relationship_record = result.single()
 
-                relationship_counts[relationship_type] = (
+                relationship_counts[
+                    relationship_type
+                ] = (
                     relationship_record["count"]
                     if relationship_record
                     else 0
                 )
 
             # ==================================================
-            # 9. IP VERSION ANALYSIS
+            # 10. IP VERSION ANALYSIS
             # ==================================================
 
             ipv4_count = 0
@@ -529,111 +1124,58 @@ def get_domain_analysis(domain, password):
             }
 
             # ==================================================
-            # 10. SUBDOMAIN PATTERN ANALYSIS
+            # 11. SUBDOMAIN PATTERN ANALYSIS
             # ==================================================
 
-            numeric_leading_count = 0
-            hyphen_count = 0
-            multi_level_count = 0
-
-            prefix_counter = Counter()
-
-            normalized_domain = (
-                domain.lower().rstrip(".")
+            subdomain_patterns = analyze_subdomain_structure(
+                subdomains,
+                domain_value
             )
 
-            for subdomain in subdomains:
+            # ==================================================
+            # 12. INFRASTRUCTURE METRICS
+            # ==================================================
 
-                normalized_subdomain = (
-                    subdomain.lower().rstrip(".")
+            infrastructure_metrics = (
+                calculate_infrastructure_metrics(
+                    subdomains,
+                    ip_addresses,
+                    asns,
+                    organizations,
+                    certificates,
+                    open_ports_by_ip
                 )
-
-                # ----------------------------------------------
-                # Remove root domain
-                # ----------------------------------------------
-
-                relative_name = normalized_subdomain
-
-                suffix = "." + normalized_domain
-
-                if normalized_subdomain.endswith(suffix):
-
-                    relative_name = normalized_subdomain[
-                        :-len(suffix)
-                    ]
-
-                # ----------------------------------------------
-                # Numeric-leading hostname
-                # ----------------------------------------------
-
-                if (
-                    relative_name
-                    and relative_name[0].isdigit()
-                ):
-                    numeric_leading_count += 1
-
-                # ----------------------------------------------
-                # Hyphen-containing hostname
-                # ----------------------------------------------
-
-                if "-" in relative_name:
-                    hyphen_count += 1
-
-                # ----------------------------------------------
-                # Multiple labels
-                # ----------------------------------------------
-
-                if "." in relative_name:
-                    multi_level_count += 1
-
-                # ----------------------------------------------
-                # First label / prefix
-                # ----------------------------------------------
-
-                first_label = relative_name.split(".")[0]
-
-                if first_label:
-                    prefix_counter[first_label] += 1
-
-            common_prefixes = [
-                {
-                    "prefix": prefix,
-                    "count": count
-                }
-                for prefix, count
-                in prefix_counter.most_common(10)
-            ]
-
-            subdomain_patterns = {
-                "numeric_leading": numeric_leading_count,
-                "contains_hyphen": hyphen_count,
-                "multi_level": multi_level_count,
-                "common_prefixes": common_prefixes
-            }
+            )
 
             # ==================================================
-            # 11. GRAPH-DERIVED OBSERVATIONS
+            # 13. GRAPH-DERIVED OBSERVATIONS
             # ==================================================
 
             observations = []
 
+            subdomain_count = len(subdomains)
+            ip_count = len(ip_addresses)
+            asn_count = len(asns)
+            organization_count = len(organizations)
+            certificate_count = len(certificates)
+
             # --------------------------------------------------
-            # Subdomain scale
+            # Subdomains
             # --------------------------------------------------
 
-            if len(subdomains) > 1000:
+            if subdomain_count > 1000:
 
                 observations.append(
-                    f"The graph contains a large subdomain "
-                    f"dataset with {len(subdomains):,} "
-                    f"observed subdomains."
+                    f"The graph contains a large observed "
+                    f"subdomain dataset with "
+                    f"{subdomain_count:,} subdomains."
                 )
 
-            elif len(subdomains) > 0:
+            elif subdomain_count > 0:
 
                 observations.append(
                     f"The graph contains "
-                    f"{len(subdomains):,} observed subdomains."
+                    f"{subdomain_count:,} observed subdomains."
                 )
 
             else:
@@ -643,17 +1185,17 @@ def get_domain_analysis(domain, password):
                 )
 
             # --------------------------------------------------
-            # IP infrastructure
+            # IP addresses
             # --------------------------------------------------
 
-            if len(ip_addresses) > 1:
+            if ip_count > 1:
 
                 observations.append(
-                    f"The domain resolves to multiple IP "
-                    f"addresses ({len(ip_addresses)} observed)."
+                    f"The domain resolves to "
+                    f"{ip_count} observed IP addresses."
                 )
 
-            elif len(ip_addresses) == 1:
+            elif ip_count == 1:
 
                 observations.append(
                     "The domain resolves to one observed "
@@ -667,65 +1209,81 @@ def get_domain_analysis(domain, password):
                 )
 
             # --------------------------------------------------
-            # IPv4 / IPv6
+            # IP version
             # --------------------------------------------------
 
             if ipv4_count > 0 and ipv6_count > 0:
 
                 observations.append(
                     f"Both IPv4 ({ipv4_count}) and IPv6 "
-                    f"({ipv6_count}) addresses are present."
+                    f"({ipv6_count}) addresses are present "
+                    f"in the observed IP dataset."
                 )
 
             elif ipv4_count > 0:
 
                 observations.append(
-                    f"Only IPv4 infrastructure was observed "
-                    f"({ipv4_count} addresses)."
+                    f"Only IPv4 addresses were observed "
+                    f"({ipv4_count})."
                 )
 
             elif ipv6_count > 0:
 
                 observations.append(
-                    f"Only IPv6 infrastructure was observed "
-                    f"({ipv6_count} addresses)."
+                    f"Only IPv6 addresses were observed "
+                    f"({ipv6_count})."
                 )
 
             # --------------------------------------------------
-            # ASN correlation
+            # Subdomain/IP concentration
             # --------------------------------------------------
 
-            if len(asns) == 1:
+            if subdomain_count > 0 and ip_count > 0:
 
                 observations.append(
-                    f"All observed IP infrastructure maps to "
-                    f"a single ASN: {asns[0]}."
+                    f"The observed dataset contains "
+                    f"{infrastructure_metrics['subdomains_per_ip']:.2f} "
+                    f"subdomains per observed IP address."
                 )
 
-            elif len(asns) > 1:
+            # --------------------------------------------------
+            # ASN relationships
+            # --------------------------------------------------
+
+            if asn_count == 1:
+
+                observations.append(
+                    f"{relationship_counts['BELONGS_TO_ASN']} "
+                    f"observed IP-to-ASN relationships map to "
+                    f"one observed ASN: {asns[0]}."
+                )
+
+            elif asn_count > 1:
 
                 observations.append(
                     f"The observed IP infrastructure maps to "
-                    f"{len(asns)} different ASNs."
+                    f"{asn_count} distinct ASNs."
                 )
 
             # --------------------------------------------------
-            # Organization correlation
+            # Organization relationships
             # --------------------------------------------------
 
-            if len(organizations) == 1:
+            if organization_count == 1:
 
                 observations.append(
-                    f"The observed IP infrastructure is "
-                    f"associated with one organization: "
-                    f"{organizations[0]}."
+                    f"{relationship_counts['ASSOCIATED_WITH']} "
+                    f"observed IP-to-organization relationships "
+                    f"are associated with one observed "
+                    f"organization: {organizations[0]}."
                 )
 
-            elif len(organizations) > 1:
+            elif organization_count > 1:
 
                 observations.append(
-                    f"The observed IP infrastructure is "
-                    f"associated with {len(organizations)} "
+                    f"The observed IP infrastructure has "
+                    f"relationships with "
+                    f"{organization_count} distinct "
                     f"organizations."
                 )
 
@@ -733,14 +1291,15 @@ def get_domain_analysis(domain, password):
             # Certificates
             # --------------------------------------------------
 
-            if len(certificates) > 1:
+            if certificate_count > 1:
 
                 observations.append(
-                    f"The graph contains {len(certificates)} "
-                    f"certificates associated with the domain."
+                    f"The graph contains "
+                    f"{certificate_count} certificates associated "
+                    f"with the domain."
                 )
 
-            elif len(certificates) == 1:
+            elif certificate_count == 1:
 
                 observations.append(
                     "One certificate is associated with "
@@ -748,15 +1307,81 @@ def get_domain_analysis(domain, password):
                 )
 
             # --------------------------------------------------
-            # Subdomain patterns
+            # Port scan
             # --------------------------------------------------
 
-            if numeric_leading_count > 0:
+            total_open_ports = (
+                port_scan_results[
+                    "total_open_ports"
+                ]
+            )
+
+            exposed_ip_count = (
+                port_scan_results[
+                    "ip_count"
+                ]
+            )
+
+            if total_open_ports > 0:
 
                 observations.append(
-                    f"{numeric_leading_count:,} observed "
-                    f"subdomains begin with a numeric character."
+                    f"Port scanning identified "
+                    f"{total_open_ports} open-port observations "
+                    f"across {exposed_ip_count} IP addresses."
                 )
+
+                unique_port_count = (
+                    port_scan_results[
+                        "unique_port_count"
+                    ]
+                )
+
+                observations.append(
+                    f"{unique_port_count} distinct port numbers "
+                    f"were observed."
+                )
+
+                most_common_ports = (
+                    port_scan_results[
+                        "most_common_ports"
+                    ]
+                )
+
+                if most_common_ports:
+
+                    common_ports_text = ", ".join(
+                        f"{item['port']} "
+                        f"({item['count']}x)"
+                        for item in most_common_ports[:3]
+                    )
+
+                    observations.append(
+                        f"The most frequently observed open "
+                        f"ports were: {common_ports_text}."
+                    )
+
+            # --------------------------------------------------
+            # Subdomain naming patterns
+            # --------------------------------------------------
+
+            numeric_count = (
+                subdomain_patterns[
+                    "numeric_leading"
+                ]
+            )
+
+            if numeric_count > 0:
+
+                observations.append(
+                    f"{numeric_count:,} observed subdomains "
+                    f"begin with a numeric character."
+                )
+
+            hyphen_count = (
+                subdomain_patterns[
+                    "contains_hyphen"
+                ]
+            )
 
             if hyphen_count > 0:
 
@@ -765,112 +1390,185 @@ def get_domain_analysis(domain, password):
                     f"contain a hyphen."
                 )
 
+            multi_level_count = (
+                subdomain_patterns[
+                    "multi_level"
+                ]
+            )
+
             if multi_level_count > 0:
 
                 observations.append(
                     f"{multi_level_count:,} observed subdomains "
-                    f"contain multiple labels."
+                    f"contain multiple labels below the target "
+                    f"domain."
                 )
 
-            # ==================================================
-            # 12. VIRUSTOTAL OBSERVATIONS
-            # ==================================================
+            environment_count = (
+                subdomain_patterns[
+                    "environment_related"
+                ]
+            )
+
+            if environment_count > 0:
+
+                observations.append(
+                    f"{environment_count:,} observed subdomains "
+                    f"match predefined environment-related "
+                    f"naming patterns."
+                )
+
+            service_count = (
+                subdomain_patterns[
+                    "service_related"
+                ]
+            )
+
+            if service_count > 0:
+
+                observations.append(
+                    f"{service_count:,} observed subdomains "
+                    f"match predefined service-related "
+                    f"naming patterns."
+                )
+
+            # --------------------------------------------------
+            # VirusTotal
+            # --------------------------------------------------
 
             if virustotal:
 
-                malicious = virustotal.get("malicious")
-                suspicious = virustotal.get("suspicious")
-                harmless = virustotal.get("harmless")
-                undetected = virustotal.get("undetected")
-                reputation = virustotal.get("reputation")
-                registrar = virustotal.get("registrar")
+                malicious = virustotal.get(
+                    "malicious"
+                )
 
-                # ----------------------------------------------
-                # Detection results
-                # ----------------------------------------------
+                suspicious = virustotal.get(
+                    "suspicious"
+                )
+
+                harmless = virustotal.get(
+                    "harmless"
+                )
+
+                undetected = virustotal.get(
+                    "undetected"
+                )
+
+                reputation = virustotal.get(
+                    "reputation"
+                )
+
+                registrar = virustotal.get(
+                    "registrar"
+                )
 
                 if malicious is not None:
 
                     observations.append(
-                        f"VirusTotal reports {malicious} "
-                        f"malicious detections for the domain."
+                        f"VirusTotal reports "
+                        f"{malicious} malicious detections "
+                        f"for the domain."
                     )
 
                 if suspicious is not None:
 
                     observations.append(
-                        f"VirusTotal reports {suspicious} "
-                        f"suspicious detections for the domain."
+                        f"VirusTotal reports "
+                        f"{suspicious} suspicious detections "
+                        f"for the domain."
                     )
 
                 if harmless is not None:
 
                     observations.append(
-                        f"VirusTotal reports {harmless} "
-                        f"harmless detections for the domain."
+                        f"VirusTotal reports "
+                        f"{harmless} harmless detections "
+                        f"for the domain."
                     )
 
                 if undetected is not None:
 
                     observations.append(
-                        f"VirusTotal reports {undetected} "
-                        f"undetected security engine results."
+                        f"VirusTotal reports "
+                        f"{undetected} undetected results "
+                        f"for the domain."
                     )
-
-                # ----------------------------------------------
-                # Reputation
-                # ----------------------------------------------
 
                 if reputation is not None:
 
                     observations.append(
-                        f"VirusTotal reputation score is "
-                        f"{reputation}."
+                        f"VirusTotal reports a reputation "
+                        f"score of {reputation}."
                     )
-
-                # ----------------------------------------------
-                # Registrar
-                # ----------------------------------------------
 
                 if registrar:
 
                     observations.append(
-                        f"The domain registrar reported by "
-                        f"VirusTotal is {registrar}."
+                        f"VirusTotal reports the domain "
+                        f"registrar as {registrar}."
                     )
 
             # ==================================================
-            # 13. RETURN STRUCTURED ANALYSIS
+            # 14. RETURN STRUCTURED ANALYSIS
             # ==================================================
 
             return {
-                "domain": record["domain"],
+
+                "domain": domain_value,
 
                 "statistics": {
                     "subdomains": len(subdomains),
                     "ip_addresses": len(ip_addresses),
                     "asns": len(asns),
                     "organizations": len(organizations),
-                    "certificates": len(certificates)
+                    "certificates": len(certificates),
+                    "open_ports":
+                        port_scan_results[
+                            "total_open_ports"
+                        ]
                 },
 
-                "relationships": relationship_counts,
+                "relationships":
+                    relationship_counts,
 
-                "ip_version_summary": ip_version_summary,
+                "ip_version_summary":
+                    ip_version_summary,
 
-                "subdomain_patterns": subdomain_patterns,
+                "subdomain_patterns":
+                    subdomain_patterns,
+
+                "infrastructure_metrics":
+                    infrastructure_metrics,
+
+                "port_scan":
+                    port_scan_results,
 
                 "infrastructure": {
-                    "subdomains": subdomains,
-                    "ip_addresses": ip_addresses,
-                    "asns": asns,
-                    "organizations": organizations,
-                    "certificates": certificates
+
+                    "subdomains":
+                        subdomains,
+
+                    "ip_addresses":
+                        ip_addresses,
+
+                    "asns":
+                        asns,
+
+                    "organizations":
+                        organizations,
+
+                    "certificates":
+                        certificates,
+
+                    "open_ports":
+                        open_ports_by_ip
                 },
 
-                "virustotal": virustotal,
+                "virustotal":
+                    virustotal,
 
-                "observations": observations
+                "observations":
+                    observations
             }
 
     finally:
@@ -900,10 +1598,6 @@ if __name__ == "__main__":
             password
         )
 
-        # ======================================================
-        # DOMAIN NOT FOUND
-        # ======================================================
-
         if analysis is None:
 
             print(
@@ -916,47 +1610,46 @@ if __name__ == "__main__":
                 "\n[+] Graph analysis complete."
             )
 
-            # ==================================================
-            # DOMAIN
-            # ==================================================
+            # ------------------------------------------------
+            # Domain
+            # ------------------------------------------------
 
             print("\nDomain:")
-
             print(
                 f"  {analysis['domain']}"
             )
 
-            # ==================================================
-            # STATISTICS
-            # ==================================================
+            # ------------------------------------------------
+            # Statistics
+            # ------------------------------------------------
 
             print("\nStatistics:")
 
-            for key, value in analysis[
-                "statistics"
-            ].items():
+            for key, value in (
+                analysis["statistics"].items()
+            ):
 
                 print(
                     f"  {key}: {value}"
                 )
 
-            # ==================================================
-            # RELATIONSHIPS
-            # ==================================================
+            # ------------------------------------------------
+            # Relationships
+            # ------------------------------------------------
 
             print("\nRelationship Summary:")
 
-            for key, value in analysis[
-                "relationships"
-            ].items():
+            for key, value in (
+                analysis["relationships"].items()
+            ):
 
                 print(
                     f"  {key}: {value}"
                 )
 
-            # ==================================================
-            # IP VERSION
-            # ==================================================
+            # ------------------------------------------------
+            # IP Version
+            # ------------------------------------------------
 
             print("\nIP Version Summary:")
 
@@ -975,9 +1668,101 @@ if __name__ == "__main__":
                 f"{analysis['ip_version_summary']['unknown']}"
             )
 
-            # ==================================================
-            # SUBDOMAIN PATTERNS
-            # ==================================================
+            # ------------------------------------------------
+            # Port Scan
+            # ------------------------------------------------
+
+            print("\nPort Scan Results:")
+
+            port_scan = analysis.get(
+                "port_scan",
+                {}
+            )
+
+            print(
+                f"  IPs with open ports: "
+                f"{port_scan.get('ip_count', 0)}"
+            )
+
+            print(
+                f"  Total open ports: "
+                f"{port_scan.get('total_open_ports', 0)}"
+            )
+
+            print(
+                f"  Unique ports: "
+                f"{port_scan.get('unique_port_count', 0)}"
+            )
+
+            unique_ports = port_scan.get(
+                "unique_ports",
+                []
+            )
+
+            if unique_ports:
+
+                print(
+                    "  Port numbers: "
+                    + ", ".join(unique_ports)
+                )
+
+            most_common_ports = port_scan.get(
+                "most_common_ports",
+                []
+            )
+
+            if most_common_ports:
+
+                print("\n  Most Common Ports:")
+
+                for item in most_common_ports:
+
+                    service = item.get(
+                        "conventional_service"
+                    )
+
+                    service_text = (
+                        f" ({service})"
+                        if service
+                        else ""
+                    )
+
+                    print(
+                        f"    - "
+                        f"{item['port']}: "
+                        f"{item['count']} occurrence(s)"
+                        f"{service_text}"
+                    )
+
+            open_ports = port_scan.get(
+                "open_ports_by_ip",
+                {}
+            )
+
+            if open_ports:
+
+                print("\n  Open Ports by IP:")
+
+                for ip, ports in list(
+                    open_ports.items()
+                )[:10]:
+
+                    print(
+                        f"    {ip}: "
+                        f"{', '.join(ports)}"
+                    )
+
+                if len(open_ports) > 10:
+
+                    print(
+                        f"    ... and "
+                        f"{len(open_ports) - 10} "
+                        f"more IPs"
+                    )
+
+            # ------------------------------------------------
+            # Subdomain Pattern Analysis
+            # ------------------------------------------------
 
             print(
                 "\nSubdomain Pattern Analysis:"
@@ -1002,6 +1787,21 @@ if __name__ == "__main__":
                 f"{patterns['multi_level']}"
             )
 
+            print(
+                f"  Environment-related: "
+                f"{patterns['environment_related']}"
+            )
+
+            print(
+                f"  Service-related: "
+                f"{patterns['service_related']}"
+            )
+
+            print(
+                f"  Wildcard: "
+                f"{patterns['wildcard']}"
+            )
+
             print("\n  Common prefixes:")
 
             for item in patterns[
@@ -1013,9 +1813,37 @@ if __name__ == "__main__":
                     f"{item['count']}"
                 )
 
-            # ==================================================
-            # VIRUSTOTAL
-            # ==================================================
+            # ------------------------------------------------
+            # Infrastructure Metrics
+            # ------------------------------------------------
+
+            print(
+                "\nInfrastructure Metrics:"
+            )
+
+            metrics = analysis.get(
+                "infrastructure_metrics",
+                {}
+            )
+
+            print(
+                f"  Subdomains per IP: "
+                f"{metrics.get('subdomains_per_ip', 0)}"
+            )
+
+            print(
+                f"  IPs with open ports: "
+                f"{metrics.get('ips_with_open_ports', 0)}"
+            )
+
+            print(
+                f"  Port exposure percentage: "
+                f"{metrics.get('port_exposure_percentage', 0)}%"
+            )
+
+            # ------------------------------------------------
+            # VirusTotal
+            # ------------------------------------------------
 
             print(
                 "\nVirusTotal Intelligence:"
@@ -1028,55 +1856,23 @@ if __name__ == "__main__":
 
             if virustotal:
 
-                print(
-                    f"  Reputation: "
-                    f"{virustotal.get('reputation')}"
-                )
+                for field in [
+                    "reputation",
+                    "malicious",
+                    "suspicious",
+                    "harmless",
+                    "undetected",
+                    "timeout",
+                    "registrar",
+                    "source",
+                    "method",
+                    "recorded_at"
+                ]:
 
-                print(
-                    f"  Malicious: "
-                    f"{virustotal.get('malicious')}"
-                )
-
-                print(
-                    f"  Suspicious: "
-                    f"{virustotal.get('suspicious')}"
-                )
-
-                print(
-                    f"  Harmless: "
-                    f"{virustotal.get('harmless')}"
-                )
-
-                print(
-                    f"  Undetected: "
-                    f"{virustotal.get('undetected')}"
-                )
-
-                print(
-                    f"  Timeout: "
-                    f"{virustotal.get('timeout')}"
-                )
-
-                print(
-                    f"  Registrar: "
-                    f"{virustotal.get('registrar')}"
-                )
-
-                print(
-                    f"  Source: "
-                    f"{virustotal.get('source')}"
-                )
-
-                print(
-                    f"  Method: "
-                    f"{virustotal.get('method')}"
-                )
-
-                print(
-                    f"  Recorded At: "
-                    f"{virustotal.get('recorded_at')}"
-                )
+                    print(
+                        f"  {field}: "
+                        f"{virustotal.get(field)}"
+                    )
 
             else:
 
@@ -1084,9 +1880,9 @@ if __name__ == "__main__":
                     "  No VirusTotal intelligence found."
                 )
 
-            # ==================================================
-            # OBSERVATIONS
-            # ==================================================
+            # ------------------------------------------------
+            # Observations
+            # ------------------------------------------------
 
             print(
                 "\nGraph-Derived Observations:"
@@ -1100,24 +1896,26 @@ if __name__ == "__main__":
                     f"  - {observation}"
                 )
 
-            # ==================================================
-            # INFRASTRUCTURE
-            # ==================================================
+            # ------------------------------------------------
+            # Infrastructure
+            # ------------------------------------------------
 
             print("\nInfrastructure:")
 
-            print(
-                f"\n  Subdomains: "
-                f"{len(analysis['infrastructure']['subdomains'])}"
-            )
-
-            print(
-                "\n  First 20 subdomains:"
-            )
-
-            for subdomain in analysis[
+            infrastructure = analysis[
                 "infrastructure"
-            ]["subdomains"][:20]:
+            ]
+
+            print(
+                f"  Subdomains: "
+                f"{len(infrastructure['subdomains'])}"
+            )
+
+            print("\n  First 20 subdomains:")
+
+            for subdomain in infrastructure[
+                "subdomains"
+            ][:20]:
 
                 print(
                     f"    - {subdomain}"
@@ -1125,9 +1923,9 @@ if __name__ == "__main__":
 
             print("\n  IP Addresses:")
 
-            for ip in analysis[
-                "infrastructure"
-            ]["ip_addresses"]:
+            for ip in infrastructure[
+                "ip_addresses"
+            ]:
 
                 print(
                     f"    - {ip}"
@@ -1135,9 +1933,9 @@ if __name__ == "__main__":
 
             print("\n  ASNs:")
 
-            for asn in analysis[
-                "infrastructure"
-            ]["asns"]:
+            for asn in infrastructure[
+                "asns"
+            ]:
 
                 print(
                     f"    - {asn}"
@@ -1145,9 +1943,9 @@ if __name__ == "__main__":
 
             print("\n  Organizations:")
 
-            for organization in analysis[
-                "infrastructure"
-            ]["organizations"]:
+            for organization in infrastructure[
+                "organizations"
+            ]:
 
                 print(
                     f"    - {organization}"
@@ -1155,9 +1953,9 @@ if __name__ == "__main__":
 
             print("\n  Certificates:")
 
-            for certificate in analysis[
-                "infrastructure"
-            ]["certificates"]:
+            for certificate in infrastructure[
+                "certificates"
+            ]:
 
                 print(
                     f"    - {certificate}"
