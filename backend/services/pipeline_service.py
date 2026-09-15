@@ -22,19 +22,18 @@ def run_osint_pipeline(
     Execute the complete Domain-Centric OSINT pipeline.
 
     Pipeline:
-
         Domain Input
-             ↓
+            |
         Domain Validation
-             ↓
+            |
         OSINT Collection
-             ↓
+            |
         Entity Normalization
-             ↓
+            |
         Neo4j Graph Loading
-             ↓
+            |
         Graph Analysis
-             ↓
+            |
         AI-Assisted Reporting
 
     OSINT Collection includes:
@@ -95,7 +94,6 @@ def run_osint_pipeline(
         """Check whether the current scan was cancelled."""
 
         if is_cancelled:
-
             try:
                 if is_cancelled():
                     print(
@@ -115,8 +113,6 @@ def run_osint_pipeline(
     # ========================================================
 
     print("\n" + "=" * 60)
-    print("DOMAIN-CENTRIC OSINT PIPELINE")
-    print("=" * 60)
 
     if scan_id:
         print(f"[*] Scan ID: {scan_id}")
@@ -158,7 +154,6 @@ def run_osint_pipeline(
     )
 
     try:
-
         raw_data = collect_domain_osint(
             domain,
             progress_callback=progress_callback,
@@ -166,7 +161,6 @@ def run_osint_pipeline(
         )
 
     except Exception as error:
-
         update_progress(
             "collection",
             "OSINT Collection",
@@ -174,7 +168,6 @@ def run_osint_pipeline(
             "failed",
             70
         )
-
         raise
 
     if check_cancelled():
@@ -187,17 +180,22 @@ def run_osint_pipeline(
     # COLLECTION SUMMARY
     # ========================================================
 
-    subdomain_count = len(
-        raw_data.get("subdomains", [])
-    )
+    # --------------------------------------------------------
+    # Subdomains
+    # --------------------------------------------------------
 
-    ip_addresses = raw_data.get(
-        "ip_addresses",
-        []
-    )
+    subdomains = raw_data.get(
+        "subdomains"
+    ) or []
 
+    subdomain_count = len(subdomains)
+
+    # --------------------------------------------------------
+    # IP addresses
+    # --------------------------------------------------------
+
+    ip_addresses = raw_data.get("ips") or []
     ip_count = len(ip_addresses)
-
     # --------------------------------------------------------
     # VirusTotal summary
     # --------------------------------------------------------
@@ -205,7 +203,7 @@ def run_osint_pipeline(
     vt_data = raw_data.get(
         "virustotal",
         {}
-    )
+    ) or {}
 
     if vt_data and not vt_data.get("error"):
 
@@ -214,10 +212,12 @@ def run_osint_pipeline(
             "N/A"
         )
 
-        vt_malicious = vt_data.get(
+        security_summary = vt_data.get(
             "security_summary",
             {}
-        ).get(
+        ) or {}
+
+        vt_malicious = security_summary.get(
             "malicious",
             0
         )
@@ -232,6 +232,13 @@ def run_osint_pipeline(
             f"Detections: {vt_malicious}"
         )
 
+    elif vt_data.get("error"):
+
+        print(
+            f"[!] VirusTotal Error: "
+            f"{vt_data.get('error')}"
+        )
+
     # --------------------------------------------------------
     # Port Scan summary
     # --------------------------------------------------------
@@ -239,7 +246,10 @@ def run_osint_pipeline(
     port_scan_data = raw_data.get(
         "port_scan",
         {}
-    )
+    ) or {}
+
+    open_ports_total = 0
+    scanned_ips = 0
 
     if port_scan_data:
 
@@ -269,7 +279,10 @@ def run_osint_pipeline(
                 f"{scanned_ips} IPs"
             )
 
+            # ------------------------------------------------
             # Show detected services
+            # ------------------------------------------------
+
             for ip_result in port_scan_data.get(
                 "results",
                 []
@@ -288,7 +301,7 @@ def run_osint_pipeline(
                     print(
                         f"    {ip}:"
                         f"{port.get('port')}/tcp"
-                        f" → "
+                        f" -> "
                         f"{port.get('service', 'unknown')}"
                     )
 
@@ -297,6 +310,43 @@ def run_osint_pipeline(
         print(
             "[!] No port scan data returned."
         )
+
+    # --------------------------------------------------------
+    # IP fallback
+    # --------------------------------------------------------
+    #
+    # If raw_data["ip_addresses"] is empty but the port scanner
+    # contains actual IP results, recover the IP addresses from
+    # the port-scan results for the collection summary.
+    #
+    # This prevents the progress message from incorrectly
+    # reporting "0 IP addresses" when an IP was actually scanned.
+    #
+
+    if ip_count == 0:
+
+        scanned_ip_values = []
+
+        for ip_result in port_scan_data.get(
+            "results",
+            []
+        ):
+
+            ip = ip_result.get("ip")
+
+            if ip and ip not in scanned_ip_values:
+                scanned_ip_values.append(ip)
+
+        if scanned_ip_values:
+
+            ip_addresses = scanned_ip_values
+            ip_count = len(ip_addresses)
+
+            #print(
+             #   "[!] IP list was empty in raw_data; "
+              #  f"using {ip_count} IP(s) from "
+               # "port scan results."
+            #)
 
     # --------------------------------------------------------
     # Collection completed
@@ -308,7 +358,8 @@ def run_osint_pipeline(
         (
             f"Collected "
             f"{subdomain_count} subdomains, "
-            f"{ip_count} IP addresses"
+            f"{ip_count} IP addresses, "
+            f"{open_ports_total} open ports"
         ),
         "completed",
         70
@@ -549,7 +600,9 @@ def run_osint_pipeline(
     try:
 
         ai_report = generate_ai_report(
-            graph_analysis
+
+            graph_analysis,
+            port_scan=raw_data.get("port_scan", {}),
         )
 
     except Exception as error:
@@ -639,7 +692,6 @@ if __name__ == "__main__":
     )
 
     print("\n")
-
     print("=" * 60)
     print("DOMAIN-CENTRIC OSINT PIPELINE")
     print("=" * 60)
@@ -666,7 +718,6 @@ if __name__ == "__main__":
         # ====================================================
 
         print("\nDomain:")
-
         print(
             f"  {analysis['domain']}"
         )
@@ -734,26 +785,27 @@ if __name__ == "__main__":
 
         print(
             f"  Numeric-leading: "
-            f"{patterns['numeric_leading']}"
+            f"{patterns.get('numeric_leading', 0)}"
         )
 
         print(
             f"  Contains hyphen: "
-            f"{patterns['contains_hyphen']}"
+            f"{patterns.get('contains_hyphen', 0)}"
         )
 
         print(
             f"  Multi-level: "
-            f"{patterns['multi_level']}"
+            f"{patterns.get('multi_level', 0)}"
         )
 
         print(
             "\n  Common prefixes:"
         )
 
-        for item in patterns[
-            "common_prefixes"
-        ]:
+        for item in patterns.get(
+            "common_prefixes",
+            []
+        ):
 
             print(
                 f"    - {item['prefix']}: "
@@ -771,7 +823,7 @@ if __name__ == "__main__":
         virustotal = analysis.get(
             "virustotal",
             {}
-        )
+        ) or {}
 
         if virustotal and not virustotal.get(
             "error"
@@ -790,7 +842,7 @@ if __name__ == "__main__":
             security_summary = virustotal.get(
                 "security_summary",
                 {}
-            )
+            ) or {}
 
             print(
                 f"  Malicious: "
@@ -853,7 +905,7 @@ if __name__ == "__main__":
         port_scan = result.get(
             "port_scan",
             {}
-        )
+        ) or {}
 
         if port_scan and not port_scan.get(
             "error"
@@ -892,7 +944,7 @@ if __name__ == "__main__":
                         print(
                             f"      - "
                             f"{port['port']}/tcp "
-                            f"→ "
+                            f"-> "
                             f"{port.get('service', 'unknown')}"
                         )
 
@@ -903,6 +955,7 @@ if __name__ == "__main__":
                             ]
 
                             if len(banner) > 100:
+
                                 banner = (
                                     banner[:100]
                                     + "..."

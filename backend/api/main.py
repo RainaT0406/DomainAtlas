@@ -2304,6 +2304,10 @@ def analyze_domain(
             "certificates",
             [],
         )
+        certificate_details = infrastructure.get(
+              "certificate_details",
+            [],
+)
 
         # ====================================================
         # INITIAL GRAPH
@@ -2435,16 +2439,17 @@ def analyze_domain(
                 {},
             ),
 
-            "infrastructure": {
-                "subdomains": subdomains,
-                "subdomain_count": len(
-                    subdomains
-                ),
-                "ip_addresses": ip_addresses,
-                "asns": asns,
-                "organizations": organizations,
-                "certificates": certificates,
-            },
+"infrastructure": {
+    "subdomains": subdomains,
+    "subdomain_count": len(
+        subdomains
+    ),
+    "ip_addresses": ip_addresses,
+    "asns": asns,
+    "organizations": organizations,
+    "certificates": certificates,
+    "certificate_details": certificate_details,
+},
 
             "provenance": all_provenance,
 

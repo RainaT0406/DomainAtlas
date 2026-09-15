@@ -39,6 +39,7 @@ import PortScanResults from "./components/PortScanResults";
 import StatCard from "./components/StatCard";
 import InfoRow from "./components/InfoRow";
 import PatternCard from "./components/PatternCard";
+import AIReport from "./components/AIReport";
 
 import {
   normalizeAnalysisData,
@@ -71,8 +72,7 @@ function App() {
   const [progress, setProgress] =
     useState([]);
 
-  const [currentProgress, setCurrentProgress] =
-    useState(0);
+
 
   const [showIntro, setShowIntro] =
     useState(true);
@@ -94,6 +94,8 @@ function App() {
     useRef(0);
 
   const eventSourceRef =
+    useRef(null);
+  const activeScanIdRef =
     useRef(null);
 
   const abortControllerRef =
@@ -340,7 +342,6 @@ function App() {
     setStopRequested(true);
 
     setProgress([]);
-    setCurrentProgress(0);
 
     setAnalysis(null);
     setScanId(null);
@@ -475,24 +476,8 @@ function App() {
       return next;
     });
 
-    if (
-      typeof update.progress ===
-      "number"
-    ) {
-      setCurrentProgress(
-        Math.max(
-          0,
-          Math.min(
-            100,
-            update.progress
-          )
-        )
-      );
-    }
-
     return true;
   };
-
   // ============================================================
   // SUBDOMAIN DISCOVERY STATUS
   // ============================================================
@@ -541,7 +526,135 @@ function App() {
 
       return undefined;
     };
+const getCurrentActivity =
+  () => {
+    const runningStep =
+      progress.find(
+        (item) =>
+          item.status ===
+          "running"
+      );
 
+    if (
+      runningStep
+    ) {
+      if (
+        runningStep.step ===
+          "subfinder" ||
+        runningStep.step ===
+          "amass"
+      ) {
+        return {
+          label:
+            "Subdomain Discovery",
+          message:
+            "Running Subfinder and Amass...",
+        };
+      }
+
+      const activityMap = {
+        init: {
+          label:
+            "Initialization",
+          message:
+            runningStep.message ||
+            "Starting analysis pipeline...",
+        },
+          collection: {
+            label: "OSINT Collection",
+            message:
+              runningStep.message ||
+              "Collecting domain intelligence...",
+          },
+
+
+
+        dns: {
+          label:
+            "DNS Resolution",
+          message:
+            runningStep.message ||
+            "Querying DNS records...",
+        },
+
+        ip_metadata: {
+          label:
+            "IP Metadata",
+          message:
+            runningStep.message ||
+            "Looking up ASN and organization...",
+        },
+
+        certificates: {
+          label:
+            "Certificate Intelligence",
+          message:
+            runningStep.message ||
+            "Querying Certificate Transparency...",
+        },
+
+        virustotal: {
+          label:
+            "VirusTotal Intelligence",
+          message:
+            runningStep.message ||
+            "Querying VirusTotal API...",
+        },
+
+        normalization: {
+          label:
+            "Entity Normalization",
+          message:
+            runningStep.message ||
+            "Normalizing collected entities...",
+        },
+
+        graph_loading: {
+          label:
+            "Knowledge Graph",
+          message:
+            runningStep.message ||
+            "Loading entities into Neo4j...",
+        },
+
+        graph_analysis: {
+          label:
+            "Graph Analysis",
+          message:
+            runningStep.message ||
+            "Analyzing knowledge graph...",
+        },
+
+        ai_report: {
+          label:
+            "AI Intelligence Report",
+          message:
+            runningStep.message ||
+            "Generating AI assessment...",
+        },
+      };
+
+      return (
+        activityMap[
+          runningStep.step
+        ] || {
+          label:
+            runningStep.step ||
+            "Processing",
+          message:
+            runningStep.message ||
+            "Processing intelligence...",
+        }
+      );
+    }
+
+    return {
+      label:
+        "Preparing Analysis",
+      message:
+        "Initializing collection pipeline...",
+    };
+  };
   // ============================================================
   // ANALYZE DOMAIN
   // ============================================================
@@ -590,13 +703,13 @@ function App() {
       setAnalysis(null);
 
       setProgress([]);
-      setCurrentProgress(0);
 
       setShowIntro(false);
       setStopRequested(false);
 
       setScanId(null);
       setActiveNav("overview");
+      activeScanIdRef.current = null;
 
       // --------------------------------------------------------
       // New AbortController
@@ -674,55 +787,67 @@ function App() {
           );
         };
 
-      eventSource.onmessage =
-        (event) => {
-          if (
-            !isCurrentScan()
-          ) {
-            closeEventSource();
-            return;
-          }
+eventSource.onmessage =
+  (event) => {
+    if (
+      !isCurrentScan()
+    ) {
+      closeEventSource();
+      return;
+    }
 
-          try {
-            const update =
-              JSON.parse(
-                event.data
-              );
+    try {
+      const update =
+        JSON.parse(
+          event.data
+        );
 
-            console.log(
-              "[*] Progress:",
-              update.step,
-              update.status,
-              update.progress
-            );
+      console.log(
+        "[*] Progress SSE:",
+        update.scan_id,
+        update.step,
+        update.status,
+        update.progress
+      );
 
-            processProgressUpdate(
-              update,
-              generation
-            );
-          } catch (err) {
-            console.error(
-              "[!] Invalid SSE message:",
-              err
-            );
-          }
-        };
+      // Ignore progress belonging to another scan.
+      // The scan ID becomes available after the POST response,
+      // so allow events while scanId is not yet known.
+      if (
+        scanId &&
+        update.scan_id &&
+        update.scan_id !== scanId
+      ) {
+        return;
+      }
 
-      eventSource.onerror =
-        () => {
-          if (
-            !isCurrentScan()
-          ) {
-            closeEventSource();
-            return;
-          }
+      processProgressUpdate(
+        update,
+        generation
+      );
+    } catch (err) {
+      console.error(
+        "[!] Invalid SSE message:",
+        err,
+        event.data
+      );
+    }
+  };
 
-          console.warn(
-            "[!] Progress SSE connection closed"
-          );
+  eventSource.onerror =
+  (event) => {
+    if (
+      !isCurrentScan()
+    ) {
+      closeEventSource();
+      return;
+    }
 
-          closeEventSource();
-        };
+    console.warn(
+      "[!] Progress SSE connection error; EventSource will retry.",
+      event
+    );
+  };
 
       // --------------------------------------------------------
       // Start backend analysis
@@ -801,23 +926,45 @@ function App() {
         // ------------------------------------------------------
         // Normalize data once
         // ------------------------------------------------------
-
-        const safeData =
-          normalizeAnalysisData(
+          console.log(
+            "DOMAINATLAS ANALYSIS RESPONSE:",
             data
           );
 
-        setScanId(
-          safeData.scan_id ||
-            null
-        );
+const safeData =
+  normalizeAnalysisData(
+    data
+  );
+
+// Preserve certificate metadata returned by the backend.
+// normalizeAnalysisData may normalize the analysis object
+// without retaining certificate_details.
+if (
+  Array.isArray(
+    data?.graph_analysis?.infrastructure?.certificate_details
+  )
+) {
+  safeData.infrastructure = {
+    ...(safeData.infrastructure || {}),
+    certificate_details:
+      data.graph_analysis.infrastructure
+        .certificate_details,
+  };
+}
+
+const completedScanId =
+  safeData.scan_id ||
+  null;
+
+          activeScanIdRef.current =
+            completedScanId;
+
+          setScanId(
+            completedScanId
+          );
 
         setAnalysis(
           safeData
-        );
-
-        setCurrentProgress(
-          100
         );
 
         setLoading(false);
@@ -977,6 +1124,13 @@ function App() {
       ? infrastructure.certificates
       : [];
 
+  const certificateDetails =
+    Array.isArray(
+      infrastructure.certificate_details
+    )
+      ? infrastructure.certificate_details
+      : [];
+
   const ipAddresses =
     Array.isArray(
       infrastructure.ip_addresses
@@ -1001,14 +1155,69 @@ function App() {
   const virustotal =
     analysis?.virustotal || {};
 
+  // ============================================================
+  // VIRUSTOTAL DATA NORMALIZATION
+  // ============================================================
+  // The backend currently returns VirusTotal detection counts as
+  // flat properties. The UI historically expected a nested
+  // security_summary object, so normalize both shapes here.
+
+  const vtMalicious =
+    Number(
+      virustotal?.security_summary?.malicious ??
+        virustotal?.malicious
+    ) || 0;
+
+  const vtSuspicious =
+    Number(
+      virustotal?.security_summary?.suspicious ??
+        virustotal?.suspicious
+    ) || 0;
+
+  const vtHarmless =
+    Number(
+      virustotal?.security_summary?.harmless ??
+        virustotal?.harmless
+    ) || 0;
+
+  const vtUndetected =
+    Number(
+      virustotal?.security_summary?.undetected ??
+        virustotal?.undetected
+    ) || 0;
+
+  const vtTimeout =
+    Number(
+      virustotal?.security_summary?.timeout ??
+        virustotal?.timeout
+    ) || 0;
+
+  const calculatedVendorTotal =
+    vtMalicious +
+    vtSuspicious +
+    vtHarmless +
+    vtUndetected +
+    vtTimeout;
+
+  const vtTotalVendors =
+    Number(
+      virustotal?.security_summary?.total_vendors ??
+        virustotal?.total_vendors
+    ) || calculatedVendorTotal;
+
   const vtRiskScore =
     Number(
       virustotal?.risk_score
     ) || 0;
 
-  const vtSecuritySummary =
-    virustotal?.security_summary ||
-    {};
+  const vtSecuritySummary = {
+    malicious: vtMalicious,
+    suspicious: vtSuspicious,
+    harmless: vtHarmless,
+    undetected: vtUndetected,
+    timeout: vtTimeout,
+    total_vendors: vtTotalVendors,
+  };
 
   const vtVendorBreakdown =
     Array.isArray(
@@ -1024,9 +1233,25 @@ function App() {
       ? virustotal.risk_factors
       : [];
 
-  const vtWhois =
-    virustotal?.whois_info ||
-    {};
+  const vtWhois = {
+    ...(virustotal?.whois_info || {}),
+    registrar:
+      virustotal?.whois_info?.registrar ||
+      virustotal?.registrar ||
+      "",
+    creation_date:
+      virustotal?.whois_info?.creation_date ||
+      virustotal?.creation_date ||
+      "",
+    expiration_date:
+      virustotal?.whois_info?.expiration_date ||
+      virustotal?.expiration_date ||
+      "",
+    last_modification_date:
+      virustotal?.whois_info?.last_modification_date ||
+      virustotal?.last_modification_date ||
+      "",
+  };
 
   const vtCommunityVotes =
     virustotal?.community_votes ||
@@ -1535,7 +1760,7 @@ function App() {
 
                 <span>
                   {loading
-                    ? `Processing intelligence (${currentProgress}%)`
+                    ? `Collecting intelligence for ${domain}`
                     : analysis?.domain ||
                       "Awaiting target"}
                 </span>
@@ -1578,9 +1803,7 @@ function App() {
 
                 <div className="pipeline-header-right">
 
-                  <div className="progress-percentage">
-                    {currentProgress}%
-                  </div>
+               
 
                   <button
                     className="stop-button"
@@ -1599,24 +1822,46 @@ function App() {
 
               </div>
 
-              <div className="progress-bar-container">
-                <div
-                  className="progress-bar-fill"
-                  style={{
-                    width: `${currentProgress}%`,
-                  }}
-                />
-              </div>
+         <div className="current-activity">
+
+          <div className="current-activity-header">
+            <span className="current-activity-indicator">
+              <Loader2
+                size={15}
+                className="spin"
+              />
+            </span>
+
+            <span>
+              CURRENT ACTIVITY
+            </span>
+          </div>
+
+          <div className="current-activity-content">
+
+            <strong>
+              {getCurrentActivity().label}
+            </strong>
+
+            <span>
+              {getCurrentActivity().message}
+            </span>
+
+          </div>
+
+        </div>
+
+        <div className="pipeline-section-label">
+          COLLECTION PIPELINE
+        </div>
+      
 
               <div className="pipeline-steps">
 
                 <PipelineStep
                   label="Initialization"
                   message="Pipeline started"
-                  progress={5}
-                  currentProgress={
-                    currentProgress
-                  }
+                
                   status={
                     progress.find(
                       (p) =>
@@ -1632,10 +1877,7 @@ function App() {
                 <PipelineStep
                   label="DNS Resolution"
                   message="Querying DNS records"
-                  progress={15}
-                  currentProgress={
-                    currentProgress
-                  }
+               
                   status={
                     progress.find(
                       (p) =>
@@ -1651,10 +1893,7 @@ function App() {
                 <PipelineStep
                   label="IP Metadata"
                   message="Looking up ASN and organization"
-                  progress={25}
-                  currentProgress={
-                    currentProgress
-                  }
+               
                   status={
                     progress.find(
                       (p) =>
@@ -1670,10 +1909,7 @@ function App() {
                 <PipelineStep
                   label="Subdomain Discovery"
                   message="Running subdomain enumeration"
-                  progress={45}
-                  currentProgress={
-                    currentProgress
-                  }
+               
                   status={getCombinedDiscoveryStatus()}
                   isCancelled={
                     stopRequested
@@ -1683,10 +1919,7 @@ function App() {
                 <PipelineStep
                   label="Certificate Intelligence"
                   message="Querying Certificate Transparency"
-                  progress={65}
-                  currentProgress={
-                    currentProgress
-                  }
+                
                   status={
                     progress.find(
                       (p) =>
@@ -1702,10 +1935,7 @@ function App() {
                 <PipelineStep
                   label="VirusTotal Intelligence"
                   message="Querying VirusTotal API"
-                  progress={75}
-                  currentProgress={
-                    currentProgress
-                  }
+                
                   status={
                     progress.find(
                       (p) =>
@@ -1721,10 +1951,7 @@ function App() {
                 <PipelineStep
                   label="Entity Normalization"
                   message="Normalizing entities"
-                  progress={80}
-                  currentProgress={
-                    currentProgress
-                  }
+               
                   status={
                     progress.find(
                       (p) =>
@@ -1740,10 +1967,7 @@ function App() {
                 <PipelineStep
                   label="Knowledge Graph"
                   message="Loading into Neo4j"
-                  progress={85}
-                  currentProgress={
-                    currentProgress
-                  }
+               
                   status={
                     progress.find(
                       (p) =>
@@ -1759,10 +1983,7 @@ function App() {
                 <PipelineStep
                   label="Graph Analysis"
                   message="Analyzing knowledge graph"
-                  progress={92}
-                  currentProgress={
-                    currentProgress
-                  }
+                
                   status={
                     progress.find(
                       (p) =>
@@ -1778,10 +1999,7 @@ function App() {
                 <PipelineStep
                   label="AI Intelligence Report"
                   message="Generating AI assessment"
-                  progress={97}
-                  currentProgress={
-                    currentProgress
-                  }
+              
                   status={
                     progress.find(
                       (p) =>
@@ -2267,97 +2485,242 @@ function App() {
 
               </section>
 
-              {/* ==============================================
-                  CERTIFICATES
-              ============================================== */}
+{/* ==============================================
+    CERTIFICATES
+============================================== */}
 
-              <section
-                ref={
-                  certificatesRef
-                }
-                className="panel-section"
-              >
+<section
+  ref={
+    certificatesRef
+  }
+  className="panel-section"
+>
 
-                <div className="panel">
+  <div className="panel">
 
-                  <div className="panel-header">
+    <div className="panel-header">
 
-                    <div>
-                      <p className="eyebrow">
-                        05 / TLS
-                        INTELLIGENCE
-                      </p>
+      <div>
+        <p className="eyebrow">
+          05 / TLS
+          INTELLIGENCE
+        </p>
 
-                      <h3>
-                        Certificate
-                        Inventory
-                      </h3>
+        <h3>
+          Certificate
+          Inventory
+        </h3>
 
-                      <p className="panel-description">
-                        Certificate
-                        identifiers
-                        observed during
-                        OSINT collection.
-                      </p>
-                    </div>
+        <p className="panel-description">
+          Certificate identifiers, cryptographic fingerprints,
+          validity periods, and revocation status observed
+          during OSINT collection.
+        </p>
+      </div>
 
-                    <div className="panel-icon">
-                      <FileKey
-                        size={20}
-                      />
-                    </div>
+      <div className="panel-icon">
+        <FileKey
+          size={20}
+        />
+      </div>
 
+    </div>
+
+  <div className="certificate-grid">
+
+  {certificateDetails.length > 0 ? (
+    certificateDetails.map(
+      (certificate, index) => {
+        const revoked =
+          certificate?.revoked === true;
+
+        return (
+          <details
+            className="certificate-item"
+            key={`${certificate?.id || "certificate"}-${index}`}
+          >
+
+            <summary className="certificate-summary">
+
+              <div className="certificate-index">
+                {String(
+                  index + 1
+                ).padStart(2, "0")}
+              </div>
+
+              <div className="certificate-content">
+
+                <div className="certificate-header">
+
+                  <div>
+                    <span>
+                      CERTIFICATE
+                    </span>
+
+                    <strong>
+                      {certificate?.id || "Unknown"}
+                    </strong>
                   </div>
 
-                  <div className="certificate-grid">
-
-                    {certificates.length >
-                    0 ? (
-                      certificates.map(
-                        (
-                          certificate,
-                          index
-                        ) => (
-                          <div
-                            className="certificate-card"
-                            key={`${certificate}-${index}`}
-                          >
-                            <div className="certificate-index">
-                              {String(
-                                index +
-                                  1
-                              ).padStart(
-                                2,
-                                "0"
-                              )}
-                            </div>
-
-                            <div>
-                              <span>
-                                CERTIFICATE
-                              </span>
-
-                              <strong>
-                                {
-                                  certificate
-                                }
-                              </strong>
-                            </div>
-                          </div>
-                        )
-                      )
-                    ) : (
-                      <div className="empty-inline">
-                        No certificate
-                        data available.
-                      </div>
-                    )}
-
-                  </div>
+                  <span
+                    className={`certificate-status ${
+                      revoked
+                        ? "revoked"
+                        : "active"
+                    }`}
+                  >
+                    {revoked
+                      ? "REVOKED"
+                      : "ACTIVE"}
+                  </span>
 
                 </div>
 
-              </section>
+              </div>
+
+              <span
+                className="certificate-toggle"
+                aria-hidden="true"
+              >
+                +
+              </span>
+
+            </summary>
+
+            <div className="certificate-details">
+
+              <div className="certificate-detail">
+                <span>
+                  Certificate SHA-256
+                </span>
+
+                <strong>
+                  {certificate?.certificate_sha256 ||
+                    "Not available"}
+                </strong>
+              </div>
+
+              <div className="certificate-detail">
+                <span>
+                  Public Key SHA-256
+                </span>
+
+                <strong>
+                  {certificate?.public_key_sha256 ||
+                    "Not available"}
+                </strong>
+              </div>
+
+              <div className="certificate-detail">
+                <span>
+                  Valid From
+                </span>
+
+                <strong>
+                  {certificate?.not_before ||
+                    "Not available"}
+                </strong>
+              </div>
+
+              <div className="certificate-detail">
+                <span>
+                  Valid Until
+                </span>
+
+                <strong>
+                  {certificate?.not_after ||
+                    "Not available"}
+                </strong>
+              </div>
+
+            </div>
+
+          </details>
+        );
+      }
+    )
+  ) : certificates.length > 0 ? (
+
+    certificates.map(
+      (
+        certificate,
+        index
+      ) => (
+
+        <details
+          className="certificate-item"
+          key={`${certificate}-${index}`}
+        >
+
+          <summary className="certificate-summary">
+
+            <div className="certificate-index">
+              {String(
+                index + 1
+              ).padStart(2, "0")}
+            </div>
+
+            <div className="certificate-content">
+
+              <div className="certificate-header">
+
+                <div>
+                  <span>
+                    CERTIFICATE
+                  </span>
+
+                  <strong>
+                    {certificate}
+                  </strong>
+                </div>
+
+              </div>
+
+            </div>
+
+            <span
+              className="certificate-toggle"
+              aria-hidden="true"
+            >
+              +
+            </span>
+
+          </summary>
+
+          <div className="certificate-details">
+
+            <div className="certificate-detail">
+              <span>
+                Certificate Metadata
+              </span>
+
+              <strong>
+                Detailed certificate metadata
+                was not returned by the analysis
+                endpoint.
+              </strong>
+            </div>
+
+          </div>
+
+        </details>
+
+      )
+    )
+
+  ) : (
+
+    <div className="empty-inline">
+      No certificate data available.
+    </div>
+
+  )}
+
+</div>
+
+  </div>
+
+</section>
 
               {/* ==============================================
                   PORT SCAN
@@ -2635,6 +2998,29 @@ function App() {
 
                       </div>
 
+                      {vtVendorBreakdown.length > 0 &&
+                        vtVendorBreakdown.filter(
+                          (v) =>
+                            v?.status === "malicious" ||
+                            v?.status === "suspicious"
+                        ).length === 0 && (
+                          <div className="vt-all-clean">
+                            <div className="vt-all-clean-icon">
+                              <CheckCircle2 size={22} />
+                            </div>
+                            <div>
+                              <strong>
+                                No malicious detections
+                              </strong>
+                              <span>
+                                All {vtVendorBreakdown.length} security
+                                vendors flagged this domain as harmless
+                                or undetected.
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
                       {vtRiskFactors.length >
                         0 && (
                         <div className="vt-risk-factors">
@@ -2712,95 +3098,73 @@ function App() {
                         </div>
                       )}
 
-                      {vtVendorBreakdown.length >
-                        0 && (
-                        <div className="vt-vendors">
+                      {vtVendorBreakdown.length > 0 &&
+                        (() => {
+                          const statusRank = {
+                            malicious: 0,
+                            suspicious: 1,
+                            undetected: 2,
+                            harmless: 3,
+                          };
+                          const sorted = [
+                            ...vtVendorBreakdown,
+                          ].sort(
+                            (a, b) =>
+                              (statusRank[a?.status] ??
+                                99) -
+                              (statusRank[b?.status] ?? 99)
+                          );
+                          const MAX_SHOWN = 30;
+                          const visible =
+                            sorted.slice(0, MAX_SHOWN);
+                          const remaining =
+                            sorted.length - visible.length;
 
-                          <h4>
-                            Security Vendor
-                            Analysis
-                          </h4>
+                          return (
+                            <div className="vt-vendors">
+                              <h4>
+                                Security Vendor Analysis
+                                <span className="vt-vendors-count">
+                                  {
+                                    vtVendorBreakdown.length
+                                  }{" "}
+                                  vendors
+                                </span>
+                              </h4>
 
-                          <div className="vt-vendor-grid">
-
-                            {vtVendorBreakdown
-                              .filter(
-                                (
-                                  vendor
-                                ) =>
-                                  vendor?.status ===
-                                    "malicious" ||
-                                  vendor?.status ===
-                                    "suspicious"
-                              )
-                              .slice(
-                                0,
-                                10
-                              )
-                              .map(
-                                (
-                                  vendor,
-                                  index
-                                ) => (
-                                  <div
-                                    key={
-                                      index
-                                    }
-                                    className={`vt-vendor-item ${vendor.status}`}
-                                  >
-
-                                    <span className="vt-vendor-name">
-                                      {
-                                        vendor.vendor
-                                      }
-                                    </span>
-
-                                    <span
-                                      className={`vt-vendor-status ${vendor.status}`}
+                              <div className="vt-vendor-grid">
+                                {visible.map(
+                                  (vendor, index) => (
+                                    <div
+                                      key={`${vendor.vendor}-${index}`}
+                                      className={`vt-vendor-item ${vendor.status}`}
                                     >
-                                      {
-                                        vendor.status
-                                      }
-                                    </span>
+                                      <span className="vt-vendor-name">
+                                        {vendor.vendor}
+                                      </span>
+                                      <span
+                                        className={`vt-vendor-status ${vendor.status}`}
+                                      >
+                                        {vendor.status}
+                                      </span>
+                                      <span className="vt-vendor-result">
+                                        {vendor.result ||
+                                          "—"}
+                                      </span>
+                                    </div>
+                                  )
+                                )}
+                              </div>
 
-                                    <span className="vt-vendor-result">
-                                      {
-                                        vendor.result
-                                      }
-                                    </span>
-
-                                  </div>
-                                )
+                              {remaining > 0 && (
+                                <div className="vt-vendor-more">
+                                  +{remaining} more
+                                  vendors not shown
+                                </div>
                               )}
-
-                          </div>
-
-                          {vtVendorBreakdown.filter(
-                            (vendor) =>
-                              vendor?.status ===
-                                "malicious" ||
-                              vendor?.status ===
-                                "suspicious"
-                          ).length >
-                            10 && (
-                            <div className="vt-vendor-more">
-                              +
-                              {vtVendorBreakdown.filter(
-                                (
-                                  vendor
-                                ) =>
-                                  vendor?.status ===
-                                    "malicious" ||
-                                  vendor?.status ===
-                                    "suspicious"
-                              ).length -
-                                10}{" "}
-                              more vendors
                             </div>
-                          )}
-
-                        </div>
-                      )}
+                          );
+                        })()}
 
                       {vtWhois &&
                         (vtWhois.registrar ||
@@ -2947,234 +3311,24 @@ function App() {
                   AI REPORT
               ============================================== */}
 
+
               <section
-                ref={
-                  aiReportRef
-                }
+                ref={aiReportRef}
                 className="panel-section"
               >
-
                 <div className="panel ai-panel">
-
-                  <div className="panel-header">
-
-                    <div>
-                      <p className="eyebrow">
-                        09 / AI-ASSISTED
-                        ANALYSIS
-                      </p>
-
-                      <h3>
-                        Intelligence
-                        Assessment
-                      </h3>
-
-                      <p className="panel-description">
-                        Structured
-                        interpretation of
-                        the collected OSINT
-                        dataset.
-                      </p>
-                    </div>
-
-                    <div className="ai-report-actions">
-
-                      <button
-                        className="download-button"
-                        onClick={
-                          handleDownloadAIReport
-                        }
-                        disabled={
-                          !aiReport
-                        }
-                      >
-                        <Download
-                          size={15}
-                        />
-                        Export Report
-                      </button>
-
-                      <div className="ai-badge">
-                        <Brain
-                          size={15}
-                        />
-
-                        <span>
-                          Ollama
-                        </span>
-                      </div>
-
-                    </div>
-
-                  </div>
-
-                  <div className="report">
-
-                    <div className="report-meta">
-
-                      <div>
-                        <span>
-                          TARGET
-                        </span>
-
-                        <strong>
-                          {
-                            analysis.domain
-                          }
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>
-                          ANALYSIS ENGINE
-                        </span>
-
-                        <strong>
-                          Ollama
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>
-                          STATUS
-                        </span>
-
-                        <strong>
-                          {aiReport
-                            ? "Generated"
-                            : "Unavailable"}
-                        </strong>
-                      </div>
-
-                    </div>
-
-                    <div className="report-content">
-
-                      {aiReport ? (
-                        aiReport
-                          .split("\n")
-                          .map(
-                            (
-                              line,
-                              index
-                            ) => {
-                              const trimmed =
-                                line.trim();
-
-                              if (
-                                !trimmed
-                              ) {
-                                return (
-                                  <div
-                                    key={
-                                      index
-                                    }
-                                    className="report-spacer"
-                                  />
-                                );
-                              }
-
-                              if (
-                                trimmed.startsWith(
-                                  "**"
-                                ) &&
-                                trimmed.endsWith(
-                                  "**"
-                                )
-                              ) {
-                                return (
-                                  <h4
-                                    key={
-                                      index
-                                    }
-                                  >
-                                    {trimmed.replace(
-                                      /\*\*/g,
-                                      ""
-                                    )}
-                                  </h4>
-                                );
-                              }
-
-                              if (
-                                trimmed.startsWith(
-                                  "- "
-                                ) ||
-                                trimmed.startsWith(
-                                  "* "
-                                )
-                              ) {
-                                return (
-                                  <p
-                                    key={
-                                      index
-                                    }
-                                    className="report-bullet"
-                                  >
-                                    <span>
-                                      •
-                                    </span>
-
-                                    {trimmed.substring(
-                                      2
-                                    )}
-                                  </p>
-                                );
-                              }
-
-                              return (
-                                <p
-                                  key={
-                                    index
-                                  }
-                                >
-                                  {trimmed}
-                                </p>
-                              );
-                            }
-                          )
-                      ) : (
-                        <p>
-                          No AI report
-                          was generated.
-                        </p>
-                      )}
-
-                    </div>
-
-                    <div className="limitation">
-
-                      <Shield
-                        size={17}
-                      />
-
-                      <div>
-                        <strong>
-                          Analytical
-                          Limitation
-                        </strong>
-
-                        <span>
-                          This report
-                          reflects only
-                          the collected
-                          OSINT data and
-                          does not
-                          establish
-                          ownership,
-                          maliciousness,
-                          benignness, or
-                          security
-                          posture.
-                        </span>
-                      </div>
-
-                    </div>
-
-                  </div>
-
+                  <AIReport
+                    report={aiReport}
+                    domain={analysis.domain}
+                    engine="Ollama"
+                    onDownload={
+                      handleDownloadAIReport
+                    }
+                    canDownload={
+                      aiReport.trim().length > 0
+                    }
+                  />
                 </div>
-
               </section>
 
               {/* ==============================================

@@ -31,6 +31,15 @@ export function normalizeAnalysisData(data) {
         )
           ? data.infrastructure.certificates
           : [],
+
+      // Preserve detailed certificate metadata returned
+      // by graph_analyzer.py.
+      certificate_details:
+        Array.isArray(
+          data?.infrastructure?.certificate_details
+        )
+          ? data.infrastructure.certificate_details
+          : [],
     },
 
     statistics: data?.statistics || {},

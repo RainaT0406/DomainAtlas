@@ -8,20 +8,20 @@ import {
 function PipelineStep({
   label,
   message,
-  progress,
-  currentProgress,
   status,
   isCancelled = false,
 }) {
-  const cancelled = status === "cancelled" || isCancelled;
-  const completed = status === "completed" && !cancelled;
-  const running = status === "running" && !cancelled;
+  const cancelled =
+    status === "cancelled" ||
+    isCancelled;
 
-  const active =
-    !cancelled &&
-    !completed &&
-    !running &&
-    currentProgress >= progress;
+  const completed =
+    status === "completed" &&
+    !cancelled;
+
+  const running =
+    status === "running" &&
+    !cancelled;
 
   let stateClass = "";
 
@@ -31,49 +31,71 @@ function PipelineStep({
     stateClass = "completed";
   } else if (running) {
     stateClass = "running";
-  } else if (active) {
-    stateClass = "active";
   }
 
   let displayText = "Waiting";
-  let displayProgress = `${progress}%`;
 
   if (cancelled) {
     displayText = "Cancelled";
-    displayProgress = "✕";
   } else if (completed) {
     displayText = "Complete";
-    displayProgress = "✓";
   } else if (running) {
-    displayText = message;
-    displayProgress = `${Math.round(currentProgress)}%`;
-  } else if (active) {
-    displayText = "Processing...";
-    displayProgress = `${Math.round(currentProgress)}%`;
+    displayText =
+      message ||
+      "Processing...";
   }
 
   return (
-    <div className={`pipeline-step ${stateClass}`}>
+    <div
+      className={`pipeline-step ${stateClass}`}
+    >
       <div className="pipeline-step-icon">
+
         {completed ? (
-          <CheckCircle2 size={16} />
+          <CheckCircle2
+            size={16}
+          />
         ) : running ? (
-          <Loader2 size={16} className="spin" />
+          <Loader2
+            size={16}
+            className="spin"
+          />
         ) : cancelled ? (
-          <Square size={16} />
+          <Square
+            size={16}
+          />
         ) : (
-          <CircleDot size={16} />
+          <CircleDot
+            size={16}
+          />
         )}
+
       </div>
 
       <div className="pipeline-step-content">
-        <strong>{label}</strong>
-        <span>{displayText}</span>
+
+        <strong>
+          {label}
+        </strong>
+
+        <span>
+          {displayText}
+        </span>
+
       </div>
 
       <div className="pipeline-step-progress">
-        {displayProgress}
+
+        {completed
+          ? "✓"
+          : cancelled
+          ? "✕"
+          : running
+          ? "●"
+          : "—"}
+
       </div>
+
     </div>
   );
 }

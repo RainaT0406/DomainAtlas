@@ -1,6 +1,29 @@
-from collections import Counter
-from ipaddress import ip_address
+"""
+graph_analyzer.py
+
+DomainAtlas - Domain-Centric OSINT Graph Analyzer
+
+This module:
+    - Finds the target Domain node in Neo4j.
+    - Performs target-scoped graph analysis.
+    - Extracts infrastructure information.
+    - Analyzes IP versions.
+    - Analyzes subdomain naming patterns.
+    - Analyzes TCP ports and service banners.
+    - Extracts VirusTotal intelligence.
+    - Generates deterministic observations.
+    - Generates Cytoscape-compatible graph data.
+
+Public functions:
+    get_domain_graph(domain, password)
+    get_domain_analysis(domain, password)
+"""
+
+import ipaddress
 import json
+import re
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
 
 from neo4j import GraphDatabase
 
@@ -14,1955 +37,3470 @@ NEO4J_USERNAME = "neo4j"
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# GENERAL HELPERS
 # ============================================================
 
-def safe_json_load(value, default):
+def safe_json_load(value: Any, fallback: Any = None) -> Any:
     """
-    Safely convert a JSON string stored in Neo4j back into
-    a Python object.
+    Safely parse JSON.
 
-    Some VirusTotal fields are stored as JSON strings.
+    If value is already a Python object, return it unchanged.
     """
+    if value is None:
+        return fallback
+
+    if isinstance(value, (dict, list, tuple, int, float, bool)):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+
+        if not text:
+            return fallback
+
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return fallback
+
+    return fallback
+
+
+def _json_safe(value: Any) -> Any:
+    """
+    Convert Neo4j/Python values into JSON-safe values.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(val)
+            for key, val in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _json_safe(item)
+            for item in value
+        ]
+
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+
+    return str(value)
+
+
+def _node_properties(node: Any) -> Dict[str, Any]:
+    """
+    Safely return Neo4j node properties.
+    """
+    if node is None:
+        return {}
+
+    try:
+        return dict(node)
+    except Exception:
+        return {}
+
+
+def _relationship_properties(
+    relationship: Any,
+) -> Dict[str, Any]:
+    """
+    Safely return Neo4j relationship properties.
+    """
+    if relationship is None:
+        return {}
+
+    try:
+        return dict(relationship)
+    except Exception:
+        return {}
+
+
+def _first_value(
+    properties: Dict[str, Any],
+    keys: List[str],
+    default: Any = None,
+) -> Any:
+    """
+    Return the first non-empty property matching the supplied keys.
+    """
+    for key in keys:
+        if key not in properties:
+            continue
+
+        value = properties.get(key)
+
+        if value is None:
+            continue
+
+        if isinstance(value, str) and not value.strip():
+            continue
+
+        return value
+
+    return default
+
+
+def _string_value(
+    properties: Dict[str, Any],
+    keys: List[str],
+    default: str = "",
+) -> str:
+    """
+    Safely extract a property as a string.
+    """
+    value = _first_value(
+        properties,
+        keys,
+        default,
+    )
+
     if value is None:
         return default
 
-    if isinstance(value, (dict, list)):
-        return value
+    return str(value).strip()
+
+
+def _integer_value(
+    properties: Dict[str, Any],
+    keys: List[str],
+    default: int = 0,
+) -> int:
+    """
+    Safely extract an integer.
+    """
+    value = _first_value(
+        properties,
+        keys,
+        default,
+    )
+
+    if value is None:
+        return default
 
     try:
-        return json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError):
+        return int(float(value))
+    except (TypeError, ValueError):
         return default
 
 
-def classify_ip_version(ip):
+# ============================================================
+# NORMALIZATION
+# ============================================================
+
+def _normalize_domain(value: Any) -> str:
     """
-    Determine whether an IP address is IPv4 or IPv6.
+    Normalize a domain/FQDN.
     """
-    try:
-        parsed_ip = ip_address(str(ip))
+    if value is None:
+        return ""
 
-        if parsed_ip.version == 4:
-            return "IPv4"
+    text = str(value).strip().lower()
 
-        if parsed_ip.version == 6:
-            return "IPv6"
+    text = re.sub(
+        r"^[a-z][a-z0-9+.-]*://",
+        "",
+        text,
+    )
 
-    except (ValueError, TypeError):
-        pass
+    text = text.split("/", 1)[0]
+    text = text.split("?", 1)[0]
+    text = text.split("#", 1)[0]
 
-    return "Unknown"
+    return text.rstrip(".")
 
 
-def normalize_port(port):
+def _normalize_ip(value: Any) -> str:
     """
-    Normalize a Neo4j port value.
-
-    Neo4j may return ports as integers or strings.
-    The analyzer uses strings consistently internally.
+    Normalize an IP address.
     """
-    if port is None:
-        return None
+    if value is None:
+        return ""
 
-    value = str(port).strip()
+    text = str(value).strip()
+
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+
+    return text
+
+
+def _classify_ip_version(value: Any) -> str:
+    """
+    Return:
+        ipv4
+        ipv6
+        unknown
+    """
+    value = _normalize_ip(value)
 
     if not value:
+        return "unknown"
+
+    try:
+        address = ipaddress.ip_address(value)
+
+        if address.version == 4:
+            return "ipv4"
+
+        if address.version == 6:
+            return "ipv6"
+
+    except ValueError:
+        pass
+
+    return "unknown"
+
+
+def _normalize_port(value: Any) -> Optional[int]:
+    """
+    Normalize different port representations.
+
+    Examples:
+        80
+        "80"
+        "80/tcp"
+        "tcp/80"
+        "port 80"
+    """
+    if value is None:
         return None
+
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value if 0 <= value <= 65535 else None
+
+    if isinstance(value, float):
+        number = int(value)
+
+        if 0 <= number <= 65535:
+            return number
+
+        return None
+
+    text = str(value).strip().lower()
+
+    if not text:
+        return None
+
+    match = re.search(
+        r"(?:tcp|udp)[\s:/-]*(\d{1,5})",
+        text,
+    )
+
+    if match:
+        number = int(match.group(1))
+
+        if 0 <= number <= 65535:
+            return number
+
+    match = re.search(
+        r"(\d{1,5})[\s:/-]*(?:tcp|udp)",
+        text,
+    )
+
+    if match:
+        number = int(match.group(1))
+
+        if 0 <= number <= 65535:
+            return number
+
+    match = re.search(
+        r"\b(\d{1,5})\b",
+        text,
+    )
+
+    if match:
+        number = int(match.group(1))
+
+        if 0 <= number <= 65535:
+            return number
+
+    return None
+
+
+def _port_display(
+    properties: Dict[str, Any],
+    port_number: Optional[int],
+) -> str:
+    """
+    Return a readable port representation.
+    """
+    protocol = _string_value(
+        properties,
+        [
+            "protocol",
+            "transport",
+            "transport_protocol",
+        ],
+        default="tcp",
+    ).lower()
+
+    if protocol not in {"tcp", "udp"}:
+        protocol = "tcp"
+
+    if port_number is not None:
+        return f"{port_number}/{protocol}"
+
+    raw = _string_value(
+        properties,
+        [
+            "port",
+            "port_number",
+            "number",
+            "value",
+            "name",
+            "id",
+        ],
+        default="",
+    )
+
+    return raw or "unknown"
+
+
+def _normalize_banner(
+    properties: Dict[str, Any],
+) -> str:
+    """
+    Extract banner/service text.
+    """
+    value = _first_value(
+        properties,
+        [
+            "banner",
+            "service_banner",
+            "serviceBanner",
+            "value",
+            "description",
+            "name",
+            "service",
+        ],
+        default="",
+    )
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+# ============================================================
+# NEO4J IDENTIFIERS
+# ============================================================
+
+def _node_element_id(node: Any) -> str:
+    """
+    Safely retrieve Neo4j node element ID.
+    """
+    if node is None:
+        return ""
+
+    try:
+        return str(node.element_id)
+    except Exception:
+        return ""
+
+
+def _relationship_element_id(
+    relationship: Any,
+) -> str:
+    """
+    Safely retrieve Neo4j relationship element ID.
+    """
+    if relationship is None:
+        return ""
+
+    try:
+        return str(relationship.element_id)
+    except Exception:
+        return ""
+
+
+def _relationship_type(
+    relationship: Any,
+) -> str:
+    """
+    Safely retrieve relationship type.
+    """
+    if relationship is None:
+        return ""
+
+    try:
+        return str(relationship.type)
+    except Exception:
+        return ""
+
+
+# ============================================================
+# NODE VALUE EXTRACTION
+# ============================================================
+
+def _node_identifier_value(
+    node: Any,
+    node_type: str,
+) -> str:
+    """
+    Extract the most meaningful identifier from a node.
+    """
+    properties = _node_properties(node)
+
+    keys = {
+        "Domain": [
+            "domain",
+            "fqdn",
+            "hostname",
+            "name",
+            "value",
+            "id",
+        ],
+        "Subdomain": [
+            "subdomain",
+            "fqdn",
+            "hostname",
+            "domain",
+            "name",
+            "value",
+            "id",
+        ],
+        "IPAddress": [
+            "ip",
+            "ip_address",
+            "address",
+            "value",
+            "name",
+            "id",
+        ],
+        "ASN": [
+            "asn",
+            "asn_number",
+            "number",
+            "value",
+            "name",
+            "id",
+        ],
+        "Organization": [
+            "organization",
+            "org",
+            "name",
+            "value",
+            "id",
+        ],
+        "Certificate": [
+            "certificate_id",
+            "cert_id",
+            "serial_number",
+            "id",
+            "value",
+            "name",
+        ],
+        "Port": [
+            "port",
+            "port_number",
+            "number",
+            "value",
+            "name",
+            "id",
+        ],
+        "ServiceBanner": [
+            "banner",
+            "service_banner",
+            "serviceBanner",
+            "value",
+            "description",
+            "name",
+            "id",
+        ],
+    }
+
+    return _string_value(
+        properties,
+        keys.get(
+            node_type,
+            [
+                "name",
+                "value",
+                "id",
+            ],
+        ),
+        default="",
+    )
+
+
+def _node_display_label(
+    node: Any,
+    node_type: str,
+) -> str:
+    """
+    Create a readable graph label.
+    """
+    value = _node_identifier_value(
+        node,
+        node_type,
+    )
+
+    if not value:
+        return node_type
+
+    if node_type == "ASN":
+        if value.upper().startswith("AS"):
+            return value.upper()
+
+        return f"AS{value}"
+
+    if node_type == "ServiceBanner":
+        if len(value) > 100:
+            return value[:97] + "..."
 
     return value
 
 
-def port_sort_key(port):
+# ============================================================
+# FIND TARGET DOMAIN
+# ============================================================
+
+def _find_target_domain(
+    session: Any,
+    domain: str,
+) -> Tuple[Optional[Any], Optional[str]]:
     """
-    Sort numeric ports numerically while keeping non-numeric
-    values valid.
+    Find the target Domain node.
+
+    The Cypher query intentionally does not reference any
+    potentially missing Domain properties.
+
+    Matching is performed in Python.
     """
-    try:
-        return (0, int(port))
-    except (TypeError, ValueError):
-        return (1, str(port))
+    requested = _normalize_domain(domain)
+
+    result = session.run(
+        """
+        MATCH (d:Domain)
+        RETURN d
+        """
+    )
+
+    for record in result:
+        node = record["d"]
+
+        properties = _node_properties(node)
+
+        candidate = _string_value(
+            properties,
+            [
+                "domain",
+                "fqdn",
+                "hostname",
+                "name",
+                "value",
+                "id",
+            ],
+            default="",
+        )
+
+        if _normalize_domain(candidate) == requested:
+            return (
+                node,
+                _node_element_id(node),
+            )
+
+    return (
+        None,
+        None,
+    )
 
 
-def unique_preserve_order(values):
+# ============================================================
+# TARGET-SCOPED GRAPH LOADING
+# ============================================================
+
+def _load_graph_context(
+    session: Any,
+    domain: str,
+) -> Dict[str, Any]:
     """
-    Remove duplicates while preserving original order.
+    Load only graph data belonging to the requested Domain node.
+
+    All traversals are directed and rooted at the target Domain.
     """
-    seen = set()
+
+    domain_node, domain_id = _find_target_domain(
+        session,
+        domain,
+    )
+
+    if domain_node is None or not domain_id:
+        raise ValueError(
+            f"Domain '{domain}' was not found in Neo4j."
+        )
+
+    context = {
+        "domain_node": domain_node,
+        "domain_id": domain_id,
+
+        "subdomains": [],
+        "subdomain_relationships": [],
+
+        "ips": [],
+        "resolve_relationships": [],
+
+        "asns": [],
+        "asn_relationships": [],
+
+        "organizations": [],
+        "organization_relationships": [],
+
+        "certificates": [],
+        "certificate_relationships": [],
+
+        "ports": [],
+        "port_relationships": [],
+
+        "banners": [],
+        "banner_relationships": [],
+    }
+
+    # --------------------------------------------------------
+    # DOMAIN -> SUBDOMAIN
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[r:HAS_SUBDOMAIN]->(s:Subdomain)
+        WHERE elementId(d) = $domain_id
+        RETURN s, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["subdomains"].append(record["s"])
+        context["subdomain_relationships"].append(record["r"])
+
+    # --------------------------------------------------------
+    # DOMAIN -> IP
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[r:RESOLVES_TO]->(ip:IPAddress)
+        WHERE elementId(d) = $domain_id
+        RETURN ip, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["ips"].append(record["ip"])
+        context["resolve_relationships"].append(record["r"])
+
+    # --------------------------------------------------------
+    # IP -> ASN
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[:RESOLVES_TO]->(ip:IPAddress)
+              -[r:BELONGS_TO_ASN]->(asn:ASN)
+        WHERE elementId(d) = $domain_id
+        RETURN asn, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["asns"].append(record["asn"])
+        context["asn_relationships"].append(record["r"])
+
+    # --------------------------------------------------------
+    # IP -> ORGANIZATION
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[:RESOLVES_TO]->(ip:IPAddress)
+              -[r:ASSOCIATED_WITH]->(org:Organization)
+        WHERE elementId(d) = $domain_id
+        RETURN org, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["organizations"].append(record["org"])
+        context["organization_relationships"].append(
+            record["r"]
+        )
+
+    # --------------------------------------------------------
+    # DOMAIN -> CERTIFICATE
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[r:HAS_CERTIFICATE]->(c:Certificate)
+        WHERE elementId(d) = $domain_id
+        RETURN c, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["certificates"].append(record["c"])
+        context["certificate_relationships"].append(
+            record["r"]
+        )
+
+    # --------------------------------------------------------
+    # IP -> PORT
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[:RESOLVES_TO]->(ip:IPAddress)
+              -[r:HAS_OPEN_PORT]->(p:Port)
+        WHERE elementId(d) = $domain_id
+        RETURN ip, p, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["ports"].append(
+            (
+                record["ip"],
+                record["p"],
+            )
+        )
+
+        context["port_relationships"].append(
+            record["r"]
+        )
+
+    # --------------------------------------------------------
+    # PORT -> SERVICE BANNER
+    # --------------------------------------------------------
+
+    result = session.run(
+        """
+        MATCH (d:Domain)-[:RESOLVES_TO]->(ip:IPAddress)
+              -[:HAS_OPEN_PORT]->(p:Port)
+              -[r:HAS_BANNER]->(b:ServiceBanner)
+        WHERE elementId(d) = $domain_id
+        RETURN ip, p, b, r
+        """,
+        domain_id=domain_id,
+    )
+
+    for record in result:
+        context["banners"].append(
+            (
+                record["ip"],
+                record["p"],
+                record["b"],
+            )
+        )
+
+        context["banner_relationships"].append(
+            record["r"]
+        )
+
+    return context
+
+
+# ============================================================
+# DEDUPLICATION
+# ============================================================
+
+def _deduplicate_nodes(
+    nodes: List[Any],
+) -> List[Any]:
+    """
+    Deduplicate Neo4j nodes using element IDs.
+    """
     result = []
+    seen = set()
 
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
+    for node in nodes:
+        element_id = _node_element_id(node)
+
+        if not element_id:
+            continue
+
+        if element_id in seen:
+            continue
+
+        seen.add(element_id)
+        result.append(node)
+
+    return result
+
+
+def _deduplicate_relationships(
+    relationships: List[Any],
+) -> List[Any]:
+    """
+    Deduplicate Neo4j relationships using element IDs.
+    """
+    result = []
+    seen = set()
+
+    for relationship in relationships:
+        element_id = _relationship_element_id(
+            relationship
+        )
+
+        if not element_id:
+            continue
+
+        if element_id in seen:
+            continue
+
+        seen.add(element_id)
+        result.append(relationship)
 
     return result
 
 
 # ============================================================
-# PORT ANALYSIS HELPERS
+# RELATIONSHIP COUNTS
 # ============================================================
 
-# These are conventional port/service associations.
-# They are NOT treated as proof that a service is running.
-COMMON_PORT_SERVICES = {
-    "20": "FTP-data",
-    "21": "FTP",
-    "22": "SSH",
-    "23": "Telnet",
-    "25": "SMTP",
-    "53": "DNS",
-    "80": "HTTP",
-    "110": "POP3",
-    "111": "RPCBind",
-    "135": "MS-RPC",
-    "139": "NetBIOS",
-    "143": "IMAP",
-    "443": "HTTPS",
-    "445": "SMB",
-    "465": "SMTPS",
-    "587": "SMTP submission",
-    "993": "IMAPS",
-    "995": "POP3S",
-    "1433": "Microsoft SQL Server",
-    "1521": "Oracle Database",
-    "2049": "NFS",
-    "2375": "Docker API",
-    "2376": "Docker API TLS",
-    "3000": "Common web application port",
-    "3306": "MySQL",
-    "3389": "RDP",
-    "5432": "PostgreSQL",
-    "5601": "Kibana",
-    "5900": "VNC",
-    "6379": "Redis",
-    "6443": "Kubernetes API",
-    "8080": "HTTP alternate",
-    "8443": "HTTPS alternate",
-    "9200": "Elasticsearch",
-    "27017": "MongoDB",
-}
-
-
-def analyze_port_distribution(open_ports_by_ip):
+def _count_relationships(
+    relationships: List[Any],
+) -> int:
     """
-    Produce deterministic statistics about observed open ports.
+    Count actual unique Neo4j relationships.
 
-    No security conclusion is made here.
+    This intentionally counts the relationship objects loaded
+    from the exact target-scoped queries.
+
+    This is especially important for HAS_BANNER.
+
+    We do NOT count rows from a broad graph traversal.
     """
-
-    all_ports = []
-
-    for ports in open_ports_by_ip.values():
-        for port in ports:
-            normalized = normalize_port(port)
-
-            if normalized is not None:
-                all_ports.append(normalized)
-
-    counter = Counter(all_ports)
-
-    unique_ports = sorted(
-        counter.keys(),
-        key=port_sort_key
+    return len(
+        _deduplicate_relationships(
+            relationships
+        )
     )
 
-    most_common = [
-        {
-            "port": port,
-            "count": count,
-            "conventional_service": COMMON_PORT_SERVICES.get(port)
-        }
-        for port, count in counter.most_common(10)
-    ]
 
-    conventional_services = []
-
-    for port in unique_ports:
-        service = COMMON_PORT_SERVICES.get(port)
-
-        if service:
-            conventional_services.append(
-                {
-                    "port": port,
-                    "service": service,
-                    "observed_on_ips": counter[port]
-                }
-            )
-
-    ports_per_ip = {}
-
-    for ip, ports in open_ports_by_ip.items():
-        ports_per_ip[ip] = len(
-            unique_preserve_order(
-                normalize_port(port)
-                for port in ports
-                if normalize_port(port) is not None
-            )
-        )
+def _get_relationship_counts(
+    context: Dict[str, Any],
+) -> Dict[str, int]:
+    """
+    Build relationship statistics from exact target-scoped
+    relationship collections.
+    """
 
     return {
-        "unique_port_count": len(unique_ports),
-        "unique_ports": unique_ports,
-        "most_common_ports": most_common,
-        "conventional_services": conventional_services,
-        "ports_per_ip": ports_per_ip,
-        "max_ports_on_single_ip": (
-            max(ports_per_ip.values())
-            if ports_per_ip
-            else 0
+        "HAS_SUBDOMAIN": _count_relationships(
+            context["subdomain_relationships"]
         ),
-        "average_ports_per_exposed_ip": (
-            round(
-                sum(ports_per_ip.values()) / len(ports_per_ip),
-                2
-            )
-            if ports_per_ip
-            else 0
-        )
+
+        "RESOLVES_TO": _count_relationships(
+            context["resolve_relationships"]
+        ),
+
+        "BELONGS_TO_ASN": _count_relationships(
+            context["asn_relationships"]
+        ),
+
+        "ASSOCIATED_WITH": _count_relationships(
+            context["organization_relationships"]
+        ),
+
+        "HAS_CERTIFICATE": _count_relationships(
+            context["certificate_relationships"]
+        ),
+
+        "HAS_OPEN_PORT": _count_relationships(
+            context["port_relationships"]
+        ),
+
+        "HAS_BANNER": _count_relationships(
+            context["banner_relationships"]
+        ),
     }
 
 
 # ============================================================
-# SUBDOMAIN ANALYSIS
+# SUBDOMAIN PATTERN ANALYSIS
 # ============================================================
 
-def analyze_subdomain_structure(subdomains, domain):
+def _subdomain_pattern_analysis(
+    subdomains: List[Any],
+    target_domain: str,
+) -> Dict[str, Any]:
     """
-    Analyze naming and structural characteristics of observed
-    subdomains.
+    Analyze subdomain naming patterns.
 
-    These are lexical observations only.
+    Definitions:
+
+        numeric_leading
+            First subdomain label begins with a digit.
+
+        contains_hyphen
+            At least one subdomain label contains "-".
+
+        deep_subdomains
+            At least two labels precede the base domain.
+
+    Compatibility aliases are included because other parts
+    of DomainAtlas may use older names.
     """
 
-    numeric_leading_count = 0
-    hyphen_count = 0
-    multi_level_count = 0
-
-    environment_count = 0
-    service_count = 0
-    wildcard_count = 0
-
-    environment_patterns = []
-    service_patterns = []
-    wildcard_patterns = []
-    numeric_patterns = []
-
-    prefix_counter = Counter()
-
-    normalized_domain = str(domain).lower().rstrip(".")
-
-    environment_regex = (
-        r"(^|[.-])(dev|development|test|testing|stage|staging|"
-        r"prod|production|qa|uat)([.-]|$)"
+    normalized_target = _normalize_domain(
+        target_domain
     )
 
-    service_regex = (
-        r"(^|[.-])(api|app|web|cdn|static|media|assets|auth|"
-        r"login|mail|smtp|pop|imap|ftp|ssh|mysql|postgres|"
-        r"redis|mongo|elastic)([.-]|$)"
-    )
+    numeric_leading = 0
+    contains_hyphen = 0
+    deep = 0
 
-    import re
+    prefix_counts = defaultdict(int)
 
-    for subdomain in subdomains:
+    unique_values = set()
 
-        if not subdomain:
+    for node in subdomains:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "subdomain",
+                "fqdn",
+                "hostname",
+                "domain",
+                "name",
+                "value",
+                "id",
+            ],
+            default="",
+        )
+
+        normalized = _normalize_domain(value)
+
+        if not normalized:
             continue
 
-        normalized = str(subdomain).lower().rstrip(".")
+        if normalized in unique_values:
+            continue
 
-        suffix = "." + normalized_domain
+        unique_values.add(normalized)
+
+        # ----------------------------------------------------
+        # Determine labels belonging to the subdomain portion.
+        # ----------------------------------------------------
+
+        prefix_labels = []
+
+        suffix = "." + normalized_target
 
         if normalized.endswith(suffix):
-            relative_name = normalized[:-len(suffix)]
-        else:
-            relative_name = normalized
+            prefix = normalized[: -len(suffix)]
 
-        if not relative_name:
+            prefix_labels = [
+                label
+                for label in prefix.split(".")
+                if label
+            ]
+
+        elif normalized == normalized_target:
+            prefix_labels = []
+
+        else:
+            # If the value is not directly under the target,
+            # analyze its labels conservatively.
+            labels = [
+                label
+                for label in normalized.split(".")
+                if label
+            ]
+
+            if len(labels) > 2:
+                prefix_labels = labels[:-2]
+            else:
+                prefix_labels = labels[:1]
+
+        # ----------------------------------------------------
+        # NUMERIC LEADING
+        # ----------------------------------------------------
+
+        if prefix_labels:
+            if re.match(
+                r"^\d",
+                prefix_labels[0],
+            ):
+                numeric_leading += 1
+
+        # ----------------------------------------------------
+        # CONTAINS HYPHEN
+        # ----------------------------------------------------
+
+        if any(
+            "-" in label
+            for label in prefix_labels
+        ):
+            contains_hyphen += 1
+
+        # ----------------------------------------------------
+        # DEEP / MULTI-LEVEL
+        # ----------------------------------------------------
+
+        if len(prefix_labels) >= 2:
+            deep += 1
+
+        # ----------------------------------------------------
+        # COMMON PREFIXES
+        # ----------------------------------------------------
+
+        if prefix_labels:
+            first_prefix = prefix_labels[0]
+
+            if first_prefix:
+                prefix_counts[first_prefix] += 1
+
+    total = len(unique_values)
+
+    common_prefixes = [
+        {
+            "prefix": prefix,
+            "count": count,
+        }
+        for prefix, count in sorted(
+            prefix_counts.items(),
+            key=lambda item: (
+                -item[1],
+                item[0],
+            ),
+        )
+    ]
+
+    # IMPORTANT:
+    # Keep every expected key present even when there are zero
+    # subdomains. This prevents KeyError exceptions elsewhere.
+    return {
+        "total": total,
+
+        "numeric_leading": numeric_leading,
+
+        "contains_hyphen": contains_hyphen,
+
+        # Compatibility alias.
+        "hyphenated": contains_hyphen,
+
+        "deep": deep,
+
+        # Compatibility alias.
+        "deep_subdomains": deep,
+
+        # Compatibility alias for older code.
+        "multi_level": deep,
+
+        "common_prefixes": common_prefixes,
+    }
+
+
+# ============================================================
+# IP VERSION ANALYSIS
+# ============================================================
+
+def _ip_version_summary(
+    ips: List[Any],
+) -> Dict[str, int]:
+    """
+    Count unique IPv4, IPv6 and unknown addresses.
+    """
+
+    summary = {
+        "ipv4": 0,
+        "ipv6": 0,
+        "unknown": 0,
+    }
+
+    seen = set()
+
+    for node in ips:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "ip",
+                "ip_address",
+                "address",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
+
+        value = _normalize_ip(value)
+
+        if not value:
             continue
 
-        if relative_name[0].isdigit():
-            numeric_leading_count += 1
-            numeric_patterns.append(subdomain)
+        if value in seen:
+            continue
 
-        if "-" in relative_name:
-            hyphen_count += 1
+        seen.add(value)
 
-        if "." in relative_name:
-            multi_level_count += 1
+        version = _classify_ip_version(
+            value
+        )
 
-        first_label = relative_name.split(".")[0]
+        summary[version] += 1
 
-        if first_label:
-            prefix_counter[first_label] += 1
+    return summary
 
-        if re.search(environment_regex, relative_name):
-            environment_count += 1
-            environment_patterns.append(subdomain)
 
-        if re.search(service_regex, relative_name):
-            service_count += 1
-            service_patterns.append(subdomain)
+# ============================================================
+# INFRASTRUCTURE
+# ============================================================
 
-        if relative_name.startswith("*."):
-            wildcard_count += 1
-            wildcard_patterns.append(subdomain)
+def _build_infrastructure(
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build normalized infrastructure information.
+    """
 
-    total = len(subdomains)
+    # --------------------------------------------------------
+    # SUBDOMAINS
+    # --------------------------------------------------------
+
+    subdomains = []
+    seen = set()
+
+    for node in context["subdomains"]:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "subdomain",
+                "fqdn",
+                "hostname",
+                "domain",
+                "name",
+                "value",
+                "id",
+            ],
+            default="",
+        )
+
+        value = _normalize_domain(value)
+
+        if not value:
+            continue
+
+        if value in seen:
+            continue
+
+        seen.add(value)
+        subdomains.append(value)
+
+    # --------------------------------------------------------
+    # IP ADDRESSES
+    # --------------------------------------------------------
+
+    ip_addresses = []
+    seen = set()
+
+    for node in context["ips"]:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "ip",
+                "ip_address",
+                "address",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
+
+        value = _normalize_ip(value)
+
+        if not value:
+            continue
+
+        if value in seen:
+            continue
+
+        seen.add(value)
+        ip_addresses.append(value)
+
+    # --------------------------------------------------------
+    # ASNs
+    # --------------------------------------------------------
+
+    asns = []
+    seen = set()
+
+    for node in context["asns"]:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "asn",
+                "asn_number",
+                "number",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
+
+        if not value:
+            continue
+
+        if value.upper().startswith("AS"):
+            display = value.upper()
+        else:
+            display = f"AS{value}"
+
+        if display in seen:
+            continue
+
+        seen.add(display)
+        asns.append(display)
+
+    # --------------------------------------------------------
+    # ORGANIZATIONS
+    # --------------------------------------------------------
+
+    organizations = []
+    seen = set()
+
+    for node in context["organizations"]:
+        properties = _node_properties(node)
+
+        value = _string_value(
+            properties,
+            [
+                "organization",
+                "org",
+                "name",
+                "value",
+                "id",
+            ],
+            default="",
+        )
+
+        if not value:
+            continue
+
+        if value in seen:
+            continue
+
+        seen.add(value)
+        organizations.append(value)
+
+       # --------------------------------------------------------
+    # CERTIFICATES
+    # --------------------------------------------------------
+
+    certificates = []
+    certificate_details = []
+    seen = set()
+
+    for node in context["certificates"]:
+
+        properties = _node_properties(node)
+
+        # ----------------------------------------------------
+        # Certificate identifier
+        # ----------------------------------------------------
+
+        value = _string_value(
+            properties,
+            [
+                "certificate_id",
+                "cert_id",
+                "serial_number",
+                "entity_value",
+                "value",
+                "name",
+            ],
+            default="",
+        )
+
+        if not value:
+            continue
+
+        if value in seen:
+            continue
+
+        seen.add(value)
+
+        # Preserve the existing simple certificate list.
+        certificates.append(value)
+
+        # ----------------------------------------------------
+        # Certificate metadata
+        # ----------------------------------------------------
+
+        certificate_sha256 = _string_value(
+            properties,
+            [
+                "certificate_sha256",
+                "cert_sha256",
+            ],
+            default="",
+        )
+
+        public_key_sha256 = _string_value(
+            properties,
+            [
+                "public_key_sha256",
+                "pubkey_sha256",
+            ],
+            default="",
+        )
+
+        not_before = _string_value(
+            properties,
+            [
+                "not_before",
+                "valid_from",
+                "validity_start",
+            ],
+            default="",
+        )
+
+        not_after = _string_value(
+            properties,
+            [
+                "not_after",
+                "valid_until",
+                "validity_end",
+            ],
+            default="",
+        )
+
+        revoked_value = _first_value(
+            properties,
+            [
+                "revoked",
+            ],
+            default=False,
+        )
+
+        if isinstance(revoked_value, str):
+            revoked = (
+                revoked_value.strip().lower()
+                in {
+                    "true",
+                    "1",
+                    "yes",
+                    "revoked",
+                }
+            )
+        else:
+            revoked = bool(revoked_value)
+
+        certificate_details.append(
+            {
+                "id": value,
+                "certificate_sha256": (
+                    certificate_sha256
+                ),
+                "public_key_sha256": (
+                    public_key_sha256
+                ),
+                "not_before": (
+                    not_before
+                ),
+                "not_after": (
+                    not_after
+                ),
+                "revoked": revoked,
+            }
+        )
+
+    # --------------------------------------------------------
+    # OPEN PORTS
+    # --------------------------------------------------------
+
+    open_ports = defaultdict(list)
+
+    for ip_node, port_node in context["ports"]:
+
+        ip_properties = _node_properties(
+            ip_node
+        )
+
+        port_properties = _node_properties(
+            port_node
+        )
+
+        ip_value = _string_value(
+            ip_properties,
+            [
+                "ip",
+                "ip_address",
+                "address",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
+
+        ip_value = _normalize_ip(
+            ip_value
+        )
+
+        if not ip_value:
+            continue
+
+        raw_port = _first_value(
+            port_properties,
+            [
+                "port",
+                "port_number",
+                "number",
+                "value",
+                "name",
+                "id",
+            ],
+            default=None,
+        )
+
+        port_number = _normalize_port(
+            raw_port
+        )
+
+        display = _port_display(
+            port_properties,
+            port_number,
+        )
+
+        if display not in open_ports[ip_value]:
+            open_ports[ip_value].append(
+                display
+            )
+
+    def port_sort_key(value: str):
+        number = _normalize_port(value)
+
+        if number is None:
+            return (
+                999999,
+                value,
+            )
+
+        return (
+            number,
+            value,
+        )
+
+    for ip_value in open_ports:
+        open_ports[ip_value] = sorted(
+            open_ports[ip_value],
+            key=port_sort_key,
+        )
 
     return {
-        "numeric_leading": numeric_leading_count,
-        "contains_hyphen": hyphen_count,
-        "multi_level": multi_level_count,
-
-        "environment_related": environment_count,
-        "service_related": service_count,
-        "wildcard": wildcard_count,
-
-        "numeric_leading_percentage": (
-            round((numeric_leading_count / total) * 100, 2)
-            if total else 0
+        "subdomains": sorted(
+            subdomains
         ),
 
-        "hyphen_percentage": (
-            round((hyphen_count / total) * 100, 2)
-            if total else 0
+        "ip_addresses": sorted(
+            ip_addresses
         ),
 
-        "multi_level_percentage": (
-            round((multi_level_count / total) * 100, 2)
-            if total else 0
+        "asns": sorted(
+            asns
         ),
 
-        "environment_patterns": environment_patterns[:100],
-        "service_patterns": service_patterns[:100],
-        "wildcard_patterns": wildcard_patterns[:100],
-        "numeric_patterns": numeric_patterns[:100],
+        "organizations": sorted(
+            organizations
+        ),
 
-        "common_prefixes": [
-            {
-                "prefix": prefix,
-                "count": count
-            }
-            for prefix, count
-            in prefix_counter.most_common(10)
-        ]
+        "certificates": sorted(
+            certificates
+        ),
+
+        "certificate_details": sorted(
+            certificate_details,
+            key=lambda item: item.get(
+                "id",
+                "",
+            ),
+        ),
+
+        "open_ports": dict(
+            sorted(
+                open_ports.items()
+            )
+        ),
     }
 
 
 # ============================================================
-# INFRASTRUCTURE METRICS
+# PORT SCAN ANALYSIS
 # ============================================================
 
-def calculate_infrastructure_metrics(
-    subdomains,
-    ip_addresses,
-    asns,
-    organizations,
-    certificates,
-    open_ports_by_ip
-):
+def _build_port_scan_analysis(
+    context: Dict[str, Any],
+    relationship_counts: Dict[str, int],
+) -> Dict[str, Any]:
     """
-    Calculate deterministic infrastructure metrics.
+    Build port-scan information from the graph.
 
-    These metrics describe the collected dataset. They do not
-    determine security, maliciousness, ownership, or compromise.
+    Important:
+
+        total_open_ports
+            Based on actual HAS_OPEN_PORT relationships.
+
+        ports_with_banners
+            Based on actual HAS_BANNER relationships.
+
+    No hardcoded counts are used.
     """
 
-    subdomain_count = len(subdomains)
-    ip_count = len(ip_addresses)
-    asn_count = len(asns)
-    organization_count = len(organizations)
-    certificate_count = len(certificates)
+    open_ports_by_ip = defaultdict(list)
 
-    total_open_ports = sum(
-        len(ports)
-        for ports in open_ports_by_ip.values()
-    )
+    scanned_ips = set()
 
-    exposed_ip_count = len(open_ports_by_ip)
+    port_keys = set()
 
-    metrics = {
-        "subdomain_count": subdomain_count,
-        "ip_count": ip_count,
-        "asn_count": asn_count,
-        "organization_count": organization_count,
-        "certificate_count": certificate_count,
+    banner_keys = set()
 
-        "total_open_ports": total_open_ports,
-        "ips_with_open_ports": exposed_ip_count,
+    banners = {}
 
-        "subdomains_per_ip": (
-            round(subdomain_count / ip_count, 2)
-            if ip_count else 0
-        ),
+    banner_details = []
 
-        "ips_per_subdomain": (
-            round(ip_count / subdomain_count, 4)
-            if subdomain_count else 0
-        ),
+    # --------------------------------------------------------
+    # OPEN PORTS
+    # --------------------------------------------------------
 
-        "certificates_per_domain": certificate_count,
+    for ip_node, port_node in context["ports"]:
 
-        "asn_concentration": (
-            round(1 / asn_count, 4)
-            if asn_count == 1
-            else None
-        ),
-
-        "port_exposure_percentage": (
-            round(
-                (exposed_ip_count / ip_count) * 100,
-                2
-            )
-            if ip_count else 0
+        ip_properties = _node_properties(
+            ip_node
         )
-    }
 
-    return metrics
+        port_properties = _node_properties(
+            port_node
+        )
 
+        ip_value = _string_value(
+            ip_properties,
+            [
+                "ip",
+                "ip_address",
+                "address",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
 
-# ============================================================
-# GRAPH DATA FOR CYTOSCAPE
-# ============================================================
+        ip_value = _normalize_ip(
+            ip_value
+        )
 
-def get_domain_graph(domain, password):
-    """
-    Retrieve the actual Neo4j nodes and relationships associated
-    with a target domain.
+        if not ip_value:
+            continue
 
-    Returns a Cytoscape-compatible structure:
+        scanned_ips.add(ip_value)
 
-    {
-        "nodes": [...],
-        "edges": [...]
-    }
+        raw_port = _first_value(
+            port_properties,
+            [
+                "port",
+                "port_number",
+                "number",
+                "value",
+                "name",
+                "id",
+            ],
+            default=None,
+        )
 
-    The domain node is always preserved when it exists.
-    """
+        port_number = _normalize_port(
+            raw_port
+        )
 
-    driver = GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USERNAME, password)
-    )
+        port_display = _port_display(
+            port_properties,
+            port_number,
+        )
 
-    try:
-        with driver.session(database="neo4j") as session:
+        key = (
+            ip_value,
+            port_display,
+        )
 
-            # ------------------------------------------------
-            # Retrieve domain + related nodes
-            # ------------------------------------------------
+        if key in port_keys:
+            continue
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
+        port_keys.add(key)
 
-                OPTIONAL MATCH path = (d)-[*1..2]-(related)
+        open_ports_by_ip[ip_value].append(
+            port_display
+        )
 
-                WITH d,
-                     collect(DISTINCT d) +
-                     collect(DISTINCT related) AS raw_nodes,
-                     collect(path) AS paths
+    # --------------------------------------------------------
+    # BANNERS
+    # --------------------------------------------------------
 
-                UNWIND raw_nodes AS node
+    for (
+        ip_node,
+        port_node,
+        banner_node,
+    ) in context["banners"]:
 
-                WITH
-                    collect(DISTINCT node) AS nodes,
-                    paths
+        ip_properties = _node_properties(
+            ip_node
+        )
 
-                RETURN nodes,
-                       paths
-                """,
-                domain=domain
-            )
+        port_properties = _node_properties(
+            port_node
+        )
 
-            record = result.single()
+        banner_properties = _node_properties(
+            banner_node
+        )
 
-            if not record:
-                return {
-                    "nodes": [],
-                    "edges": []
-                }
+        ip_value = _string_value(
+            ip_properties,
+            [
+                "ip",
+                "ip_address",
+                "address",
+                "value",
+                "name",
+                "id",
+            ],
+            default="",
+        )
 
-            # ------------------------------------------------
-            # NODES
-            # ------------------------------------------------
+        ip_value = _normalize_ip(
+            ip_value
+        )
 
-            nodes = []
-            node_ids = set()
+        if not ip_value:
+            continue
 
-            for node in record["nodes"]:
+        raw_port = _first_value(
+            port_properties,
+            [
+                "port",
+                "port_number",
+                "number",
+                "value",
+                "name",
+                "id",
+            ],
+            default=None,
+        )
 
-                if node is None:
-                    continue
+        port_number = _normalize_port(
+            raw_port
+        )
 
-                labels = list(node.labels)
+        port_display = _port_display(
+            port_properties,
+            port_number,
+        )
 
-                if not labels:
-                    continue
+        banner_value = _normalize_banner(
+            banner_properties
+        )
 
-                node_type = labels[0]
-                node_id = str(node.element_id)
+        # A ServiceBanner node without usable text is still
+        # represented in the graph, but cannot be placed in
+        # the human-readable banners dictionary.
+        if not banner_value:
+            continue
 
-                value = node.get("value", node_id)
+        key = (
+            ip_value,
+            port_display,
+        )
 
-                node_data = {
-                    "id": node_id,
-                    "label": str(value),
-                    "type": node_type
-                }
+        if key in banner_keys:
+            continue
 
-                # Port-specific properties
-                if node_type == "Port":
+        banner_keys.add(key)
 
-                    port_value = normalize_port(
-                        node.get("value")
-                    )
+        readable_key = (
+            f"{ip_value}:{port_display}"
+        )
 
-                    if port_value:
-                        node_data["label"] = port_value
+        banners[readable_key] = (
+            banner_value
+        )
 
-                    service = node.get("service")
-
-                    if service:
-                        node_data["service"] = str(service)
-
-                    banner = node.get("banner")
-
-                    if banner:
-                        node_data["banner"] = str(banner)[:200]
-
-                # ServiceBanner properties
-                if node_type == "ServiceBanner":
-
-                    node_data["label"] = str(value)
-
-                nodes.append({
-                    "data": node_data
-                })
-
-                node_ids.add(node_id)
-
-            # ------------------------------------------------
-            # EDGES
-            # ------------------------------------------------
-
-            edges = []
-            edge_ids = set()
-
-            for path in record["paths"]:
-
-                if path is None:
-                    continue
-
-                for relationship in path.relationships:
-
-                    edge_id = str(relationship.element_id)
-
-                    if edge_id in edge_ids:
-                        continue
-
-                    start_id = str(
-                        relationship.start_node.element_id
-                    )
-
-                    target_id = str(
-                        relationship.end_node.element_id
-                    )
-
-                    # Only include relationships whose endpoints
-                    # are actually present in the node set.
-                    if (
-                        start_id not in node_ids
-                        or target_id not in node_ids
-                    ):
-                        continue
-
-                    edges.append(
-                        {
-                            "data": {
-                                "id": edge_id,
-                                "source": start_id,
-                                "target": target_id,
-                                "label": relationship.type
-                            }
-                        }
-                    )
-
-                    edge_ids.add(edge_id)
-
-            return {
-                "nodes": nodes,
-                "edges": edges
+        banner_details.append(
+            {
+                "ip": ip_value,
+                "port": port_display,
+                "banner": banner_value,
             }
+        )
 
-    finally:
-        driver.close()
+    # --------------------------------------------------------
+    # SORT PORTS
+    # --------------------------------------------------------
 
+    def port_sort_key(value: str):
+        number = _normalize_port(value)
 
-# ============================================================
-# DOMAIN GRAPH ANALYSIS
-# ============================================================
+        if number is None:
+            return (
+                999999,
+                value,
+            )
 
-def get_domain_analysis(domain, password):
-    """
-    Analyze the Neo4j graph associated with a target domain.
+        return (
+            number,
+            value,
+        )
 
-    The function performs deterministic analysis of collected
-    graph data. It does not perform external lookups.
+    for ip_value in open_ports_by_ip:
+        open_ports_by_ip[ip_value] = sorted(
+            set(
+                open_ports_by_ip[ip_value]
+            ),
+            key=port_sort_key,
+        )
 
-    Returns a structured dictionary suitable for:
+    # --------------------------------------------------------
+    # SORT BANNER DETAILS
+    # --------------------------------------------------------
 
-        - FastAPI
-        - Dashboard
-        - AI-assisted reporting
-        - JSON output
-    """
-
-    driver = GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USERNAME, password)
+    banner_details = sorted(
+        banner_details,
+        key=lambda item: (
+            item["ip"],
+            (
+                _normalize_port(
+                    item["port"]
+                )
+                if _normalize_port(
+                    item["port"]
+                ) is not None
+                else 999999
+            ),
+            item["port"],
+        ),
     )
 
-    try:
-        with driver.session(database="neo4j") as session:
+    # --------------------------------------------------------
+    # EXACT GRAPH COUNTS
+    # --------------------------------------------------------
 
-            # ==================================================
-            # 1. BASIC DOMAIN INFORMATION
-            # ==================================================
+    total_open_ports = int(
+        relationship_counts.get(
+            "HAS_OPEN_PORT",
+            0,
+        )
+    )
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                RETURN d.value AS domain
-                """,
-                domain=domain
+    total_banner_relationships = int(
+        relationship_counts.get(
+            "HAS_BANNER",
+            0,
+        )
+    )
+
+    # The relationship count is authoritative for graph
+    # analysis. The banner text dictionary can only contain
+    # entries that have usable banner text.
+    ports_with_banners = min(
+        total_banner_relationships,
+        len(banner_keys),
+    )
+
+    if total_open_ports > 0:
+        banner_coverage_percentage = round(
+            (
+                ports_with_banners
+                / total_open_ports
             )
+            * 100,
+            1,
+        )
+    else:
+        banner_coverage_percentage = 0.0
 
-            record = result.single()
+    ips_with_open_ports = sum(
+        1
+        for values in open_ports_by_ip.values()
+        if values
+    )
 
-            if not record:
-                return None
+    return {
+        "scanned_ips": sorted(
+            scanned_ips
+        ),
 
-            domain_value = record["domain"]
+        "total_open_ports": (
+            total_open_ports
+        ),
 
-            # ==================================================
-            # 2. VIRUSTOTAL INTELLIGENCE
-            # ==================================================
+        "ips_with_open_ports": (
+            ips_with_open_ports
+        ),
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
+        "ports_with_banners": (
+            ports_with_banners
+        ),
 
-                RETURN
-                    d.vt_source AS source,
-                    d.vt_method AS method,
-                    d.vt_recorded_at AS recorded_at,
-                    d.vt_reputation AS reputation,
-                    d.vt_malicious AS malicious,
-                    d.vt_suspicious AS suspicious,
-                    d.vt_harmless AS harmless,
-                    d.vt_undetected AS undetected,
-                    d.vt_timeout AS timeout,
-                    d.vt_registrar AS registrar,
-                    d.vt_creation_date AS creation_date,
-                    d.vt_last_modification_date
-                        AS last_modification_date,
-                    d.vt_categories AS categories,
-                    d.vt_popularity_ranks AS popularity_ranks,
-                    d.vt_dns_records AS dns_records
-                """,
-                domain=domain
+        "banner_coverage_percentage": (
+            banner_coverage_percentage
+        ),
+
+        "open_ports_by_ip": dict(
+            sorted(
+                open_ports_by_ip.items()
             )
+        ),
 
-            vt_record = result.single()
-
-            virustotal = {}
-
-            if vt_record:
-
-                vt_fields = [
-                    "source",
-                    "method",
-                    "recorded_at",
-                    "reputation",
-                    "malicious",
-                    "suspicious",
-                    "harmless",
-                    "undetected",
-                    "timeout",
-                    "registrar",
-                    "creation_date",
-                    "last_modification_date",
-                    "categories",
-                    "popularity_ranks",
-                    "dns_records"
-                ]
-
-                has_vt_data = any(
-                    vt_record[field] is not None
-                    for field in vt_fields
-                )
-
-                if has_vt_data:
-
-                    virustotal = {
-                        "source": vt_record["source"],
-                        "method": vt_record["method"],
-                        "recorded_at": vt_record["recorded_at"],
-                        "reputation": vt_record["reputation"],
-                        "malicious": vt_record["malicious"],
-                        "suspicious": vt_record["suspicious"],
-                        "harmless": vt_record["harmless"],
-                        "undetected": vt_record["undetected"],
-                        "timeout": vt_record["timeout"],
-                        "registrar": vt_record["registrar"],
-                        "creation_date":
-                            vt_record["creation_date"],
-                        "last_modification_date":
-                            vt_record[
-                                "last_modification_date"
-                            ],
-                        "categories": safe_json_load(
-                            vt_record["categories"],
-                            {}
-                        ),
-                        "popularity_ranks": safe_json_load(
-                            vt_record["popularity_ranks"],
-                            {}
-                        ),
-                        "dns_records": safe_json_load(
-                            vt_record["dns_records"],
-                            []
-                        )
-                    }
-
-            # ==================================================
-            # 3. SUBDOMAINS
-            # ==================================================
-
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                      -[:HAS_SUBDOMAIN]->
-                      (s:Subdomain)
-
-                RETURN DISTINCT s.value AS subdomain
-                ORDER BY subdomain
-                """,
-                domain=domain
+        "banners": dict(
+            sorted(
+                banners.items()
             )
+        ),
 
-            subdomains = [
-                record["subdomain"]
-                for record in result
-                if record["subdomain"]
+        "banner_details": (
+            banner_details
+        ),
+    }
+
+
+# ============================================================
+# VIRUSTOTAL
+# ============================================================
+
+def _extract_virustotal(
+    domain_properties: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Extract VirusTotal intelligence.
+
+    Supports:
+        - direct properties
+        - nested VirusTotal dictionaries
+        - security_summary
+        - last_analysis_stats
+    """
+
+    nested = {}
+
+    for key in [
+        "virustotal",
+        "virus_total",
+        "virusTotal",
+        "vt",
+        "vt_intelligence",
+        "virus_total_intelligence",
+    ]:
+
+        if key not in domain_properties:
+            continue
+
+        parsed = safe_json_load(
+            domain_properties[key],
+            fallback=None,
+        )
+
+        if isinstance(parsed, dict):
+            nested = parsed
+            break
+
+    security_summary = safe_json_load(
+        nested.get(
+            "security_summary"
+        ),
+        fallback=nested.get(
+            "security_summary",
+            {},
+        ),
+    )
+
+    if not isinstance(
+        security_summary,
+        dict,
+    ):
+        security_summary = {}
+
+    last_analysis_stats = safe_json_load(
+        nested.get(
+            "last_analysis_stats"
+        ),
+        fallback=nested.get(
+            "last_analysis_stats",
+            {},
+        ),
+    )
+
+    if not isinstance(
+        last_analysis_stats,
+        dict,
+    ):
+        last_analysis_stats = {}
+
+    def get_value(
+        direct_keys,
+        nested_keys,
+        default=None,
+    ):
+        value = _first_value(
+            domain_properties,
+            direct_keys,
+            default=None,
+        )
+
+        if value is not None:
+            return value
+
+        value = _first_value(
+            nested,
+            nested_keys,
+            default=None,
+        )
+
+        if value is not None:
+            return value
+
+        value = _first_value(
+            security_summary,
+            nested_keys,
+            default=None,
+        )
+
+        if value is not None:
+            return value
+
+        value = _first_value(
+            last_analysis_stats,
+            nested_keys,
+            default=None,
+        )
+
+        if value is not None:
+            return value
+
+        return default
+
+    risk_score = get_value(
+        [
+            "vt_risk_score",
+            "virus_total_risk_score",
+            "risk_score",
+        ],
+        [
+            "risk_score",
+        ],
+        0,
+    )
+
+    reputation = get_value(
+        [
+            "vt_reputation",
+            "virus_total_reputation",
+            "reputation",
+        ],
+        [
+            "reputation",
+        ],
+        0,
+    )
+
+    malicious = get_value(
+        [
+            "vt_malicious",
+            "virus_total_malicious",
+            "malicious",
+        ],
+        [
+            "malicious",
+        ],
+        0,
+    )
+
+    suspicious = get_value(
+        [
+            "vt_suspicious",
+            "virus_total_suspicious",
+            "suspicious",
+        ],
+        [
+            "suspicious",
+        ],
+        0,
+    )
+
+    harmless = get_value(
+        [
+            "vt_harmless",
+            "virus_total_harmless",
+            "harmless",
+        ],
+        [
+            "harmless",
+        ],
+        0,
+    )
+
+    undetected = get_value(
+        [
+            "vt_undetected",
+            "virus_total_undetected",
+            "undetected",
+        ],
+        [
+            "undetected",
+        ],
+        0,
+    )
+
+    timeout = get_value(
+        [
+            "vt_timeout",
+            "virus_total_timeout",
+            "timeout",
+        ],
+        [
+            "timeout",
+        ],
+        0,
+    )
+
+    total_vendors = get_value(
+        [
+            "vt_total_vendors",
+            "virus_total_total_vendors",
+            "total_vendors",
+        ],
+        [
+            "total_vendors",
+        ],
+        None,
+    )
+
+    registrar = get_value(
+        [
+            "vt_registrar",
+            "virus_total_registrar",
+            "registrar",
+        ],
+        [
+            "registrar",
+        ],
+        "",
+    )
+
+    categories = get_value(
+        [
+            "vt_categories",
+            "virus_total_categories",
+            "categories",
+        ],
+        [
+            "categories",
+        ],
+        {},
+    )
+
+    def as_int(value: Any) -> int:
+        try:
+            return int(float(value))
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return 0
+
+    risk_score = as_int(
+        risk_score
+    )
+
+    reputation = as_int(
+        reputation
+    )
+
+    malicious = as_int(
+        malicious
+    )
+
+    suspicious = as_int(
+        suspicious
+    )
+
+    harmless = as_int(
+        harmless
+    )
+
+    undetected = as_int(
+        undetected
+    )
+
+    timeout = as_int(
+        timeout
+    )
+
+    if total_vendors is None:
+        total_vendors = (
+            malicious
+            + suspicious
+            + harmless
+            + undetected
+            + timeout
+        )
+    else:
+        total_vendors = as_int(
+            total_vendors
+        )
+
+    if not isinstance(
+        categories,
+        dict,
+    ):
+        categories = {}
+
+    registrar = (
+        str(registrar).strip()
+        if registrar is not None
+        else ""
+    )
+
+    available = bool(nested)
+
+    if not available:
+        available = any(
+            key in domain_properties
+            for key in [
+                "vt_risk_score",
+                "virus_total_risk_score",
+                "risk_score",
+                "virustotal",
+                "virus_total",
+                "virusTotal",
+                "vt",
             ]
+        )
 
-            # ==================================================
-            # 4. IP ADDRESSES
-            # ==================================================
+    return {
+        "available": available,
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                      -[:RESOLVES_TO]->
-                      (ip:IPAddress)
+        "risk_score": risk_score,
 
-                RETURN DISTINCT ip.value AS ip
-                ORDER BY ip
-                """,
-                domain=domain
+        "reputation": reputation,
+
+        "malicious": malicious,
+
+        "suspicious": suspicious,
+
+        "harmless": harmless,
+
+        "undetected": undetected,
+
+        "timeout": timeout,
+
+        "total_vendors": total_vendors,
+
+        "registrar": registrar,
+
+        "categories": _json_safe(
+            categories
+        ),
+
+        "security_summary": {
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+            "timeout": timeout,
+            "total_vendors": total_vendors,
+        },
+    }
+
+
+# ============================================================
+# OBSERVATIONS
+# ============================================================
+
+def _generate_observations(
+    statistics: Dict[str, int],
+    ip_versions: Dict[str, int],
+    subdomain_patterns: Dict[str, Any],
+    infrastructure: Dict[str, Any],
+    port_scan: Dict[str, Any],
+    virustotal: Dict[str, Any],
+) -> List[str]:
+    """
+    Generate deterministic observations.
+
+    These are observations of collected data only.
+    They do not establish ownership, compromise,
+    maliciousness, benignness or overall security posture.
+    """
+
+    observations = []
+
+    subdomain_count = statistics.get(
+        "subdomains",
+        0,
+    )
+
+    ip_count = statistics.get(
+        "ip_addresses",
+        0,
+    )
+
+    asn_count = statistics.get(
+        "asns",
+        0,
+    )
+
+    organization_count = statistics.get(
+        "organizations",
+        0,
+    )
+
+    certificate_count = statistics.get(
+        "certificates",
+        0,
+    )
+
+    open_port_count = statistics.get(
+        "open_ports",
+        0,
+    )
+
+    # --------------------------------------------------------
+    # SUBDOMAINS
+    # --------------------------------------------------------
+
+    if subdomain_count == 0:
+        observations.append(
+            "No subdomains were observed in the collected "
+            "DomainAtlas data."
+        )
+
+    elif subdomain_count == 1:
+        observations.append(
+            "1 subdomain was observed in the collected "
+            "DomainAtlas data."
+        )
+
+    else:
+        observations.append(
+            f"{subdomain_count} subdomains were observed "
+            "in the collected DomainAtlas data."
+        )
+
+    numeric_leading = subdomain_patterns.get(
+        "numeric_leading",
+        0,
+    )
+
+    contains_hyphen = subdomain_patterns.get(
+        "contains_hyphen",
+        subdomain_patterns.get(
+            "hyphenated",
+            0,
+        ),
+    )
+
+    deep = subdomain_patterns.get(
+        "deep_subdomains",
+        subdomain_patterns.get(
+            "deep",
+            subdomain_patterns.get(
+                "multi_level",
+                0,
+            ),
+        ),
+    )
+
+    if numeric_leading > 0:
+        observations.append(
+            f"{numeric_leading} subdomain"
+            f"{'' if numeric_leading == 1 else 's'} "
+            "had a first label beginning with a numeric character."
+        )
+
+    if contains_hyphen > 0:
+        observations.append(
+            f"{contains_hyphen} subdomain"
+            f"{'' if contains_hyphen == 1 else 's'} "
+            "contained a hyphen in at least one label."
+        )
+
+    if deep > 0:
+        observations.append(
+            f"{deep} subdomain"
+            f"{'' if deep == 1 else 's'} "
+            "had at least two labels preceding the base domain."
+        )
+
+    # --------------------------------------------------------
+    # IP VERSIONS
+    # --------------------------------------------------------
+
+    ipv4 = ip_versions.get(
+        "ipv4",
+        0,
+    )
+
+    ipv6 = ip_versions.get(
+        "ipv6",
+        0,
+    )
+
+    unknown = ip_versions.get(
+        "unknown",
+        0,
+    )
+
+    if ipv4 == 1:
+        observations.append(
+            "1 IPv4 address was observed."
+        )
+
+    elif ipv4 > 1:
+        observations.append(
+            f"{ipv4} IPv4 addresses were observed."
+        )
+
+    if ipv6 == 1:
+        observations.append(
+            "1 IPv6 address was observed."
+        )
+
+    elif ipv6 > 1:
+        observations.append(
+            f"{ipv6} IPv6 addresses were observed."
+        )
+
+    if unknown == 1:
+        observations.append(
+            "1 observed address could not be classified "
+            "as IPv4 or IPv6."
+        )
+
+    elif unknown > 1:
+        observations.append(
+            f"{unknown} observed addresses could not be "
+            "classified as IPv4 or IPv6."
+        )
+
+    # --------------------------------------------------------
+    # ASN
+    # --------------------------------------------------------
+
+    if asn_count == 1:
+        asns = infrastructure.get(
+            "asns",
+            [],
+        )
+
+        if asns:
+            observations.append(
+                "One ASN was associated with the observed "
+                f"infrastructure: {asns[0]}."
+            )
+        else:
+            observations.append(
+                "One ASN was associated with the observed "
+                "infrastructure."
             )
 
-            ip_addresses = [
-                record["ip"]
-                for record in result
-                if record["ip"]
-            ]
+    elif asn_count > 1:
+        observations.append(
+            f"{asn_count} ASNs were associated with "
+            "the observed infrastructure."
+        )
 
-            # ==================================================
-            # 5. PORT SCAN RESULTS
-            # ==================================================
+    # --------------------------------------------------------
+    # ORGANIZATION
+    # --------------------------------------------------------
 
-            open_ports_by_ip = {}
-            port_banners = {}
+    if organization_count == 1:
+        organizations = infrastructure.get(
+            "organizations",
+            [],
+        )
 
-            # IMPORTANT:
-            # Only ports connected to this domain's observed IPs
-            # are retrieved.
-
-            if ip_addresses:
-
-                result = session.run(
-                    """
-                    MATCH (d:Domain {value: $domain})
-                          -[:RESOLVES_TO]->
-                          (ip:IPAddress)
-                          -[:HAS_OPEN_PORT]->
-                          (p:Port)
-
-                    RETURN DISTINCT
-                        ip.value AS ip,
-                        p.value AS port
-
-                    ORDER BY ip, port
-                    """,
-                    domain=domain
-                )
-
-                for record in result:
-
-                    ip = record["ip"]
-                    port = normalize_port(
-                        record["port"]
-                    )
-
-                    if not ip or port is None:
-                        continue
-
-                    open_ports_by_ip.setdefault(
-                        ip,
-                        []
-                    ).append(port)
-
-                # Remove duplicates and sort ports.
-                for ip, ports in open_ports_by_ip.items():
-
-                    open_ports_by_ip[ip] = sorted(
-                        unique_preserve_order(ports),
-                        key=port_sort_key
-                    )
-
-                # ----------------------------------------------
-                # Domain-scoped banners
-                # ----------------------------------------------
-
-                try:
-
-                    result = session.run(
-                        """
-                        MATCH (d:Domain {value: $domain})
-                              -[:RESOLVES_TO]->
-                              (ip:IPAddress)
-                              -[:HAS_OPEN_PORT]->
-                              (p:Port)
-                              -[:HAS_BANNER]->
-                              (b:ServiceBanner)
-
-                        RETURN DISTINCT
-                            ip.value AS ip,
-                            p.value AS port,
-                            b.value AS banner
-                        """,
-                        domain=domain
-                    )
-
-                    for record in result:
-
-                        ip = record["ip"]
-                        port = normalize_port(
-                            record["port"]
-                        )
-                        banner = record["banner"]
-
-                        if (
-                            not ip
-                            or port is None
-                            or banner is None
-                        ):
-                            continue
-
-                        port_banners.setdefault(
-                            ip,
-                            {}
-                        ).setdefault(
-                            port,
-                            []
-                        ).append(
-                            str(banner)
-                        )
-
-                except Exception:
-                    # Banner data is supplementary.
-                    # A missing banner must not break the
-                    # main port analysis.
-                    port_banners = {}
-
-            port_distribution = analyze_port_distribution(
-                open_ports_by_ip
+        if organizations:
+            observations.append(
+                "One organization was associated with the "
+                f"observed infrastructure: {organizations[0]}."
+            )
+        else:
+            observations.append(
+                "One organization was associated with the "
+                "observed infrastructure."
             )
 
-            port_scan_results = {
-                "ip_count": len(open_ports_by_ip),
+    elif organization_count > 1:
+        observations.append(
+            f"{organization_count} organizations were associated "
+            "with the observed infrastructure."
+        )
 
-                "total_open_ports": sum(
-                    len(ports)
-                    for ports in open_ports_by_ip.values()
+    # --------------------------------------------------------
+    # CERTIFICATES
+    # --------------------------------------------------------
+
+    if certificate_count == 1:
+        observations.append(
+            "One certificate was observed for the target domain."
+        )
+
+    elif certificate_count > 1:
+        observations.append(
+            f"{certificate_count} certificates were observed "
+            "for the target domain."
+        )
+
+    # --------------------------------------------------------
+    # PORTS
+    # --------------------------------------------------------
+
+    if open_port_count == 0:
+        observations.append(
+            "No open TCP ports were represented in the analyzed graph."
+        )
+
+    elif open_port_count == 1:
+        observations.append(
+            "1 open TCP port was represented in the analyzed graph."
+        )
+
+    else:
+        observations.append(
+            f"{open_port_count} open TCP ports were represented "
+            "in the analyzed graph."
+        )
+
+    ports_with_banners = port_scan.get(
+        "ports_with_banners",
+        0,
+    )
+
+    coverage = port_scan.get(
+        "banner_coverage_percentage",
+        0.0,
+    )
+
+    if open_port_count > 0:
+        observations.append(
+            "Service banners were associated with "
+            f"{ports_with_banners} of {open_port_count} "
+            "represented open TCP ports "
+            f"({coverage:.1f}% graph banner coverage)."
+        )
+
+    # --------------------------------------------------------
+    # VIRUSTOTAL
+    # --------------------------------------------------------
+
+    if virustotal.get(
+        "available",
+        False,
+    ):
+        malicious = virustotal.get(
+            "malicious",
+            0,
+        )
+
+        suspicious = virustotal.get(
+            "suspicious",
+            0,
+        )
+
+        total_vendors = virustotal.get(
+            "total_vendors",
+            0,
+        )
+
+        risk_score = virustotal.get(
+            "risk_score",
+            0,
+        )
+
+        observations.append(
+            "VirusTotal reported "
+            f"{malicious} malicious and "
+            f"{suspicious} suspicious detections "
+            f"among {total_vendors} vendor results, "
+            f"with a reported risk score of "
+            f"{risk_score}/100. "
+            "These are external multi-vendor observations "
+            "and do not independently establish maliciousness."
+        )
+
+    return observations
+
+
+# ============================================================
+# DOMAIN ANALYSIS
+# ============================================================
+
+def _build_domain_analysis(
+    context: Dict[str, Any],
+    relationship_counts: Dict[str, int],
+    requested_domain: str,
+) -> Dict[str, Any]:
+    """
+    Build the complete analysis result.
+    """
+
+    domain_node = context[
+        "domain_node"
+    ]
+
+    domain_properties = _node_properties(
+        domain_node
+    )
+
+    actual_domain = _string_value(
+        domain_properties,
+        [
+            "domain",
+            "fqdn",
+            "hostname",
+            "name",
+            "value",
+            "id",
+        ],
+        default=requested_domain,
+    )
+
+    actual_domain = _normalize_domain(
+        actual_domain
+    )
+
+    unique_subdomains = _deduplicate_nodes(
+        context["subdomains"]
+    )
+
+    unique_ips = _deduplicate_nodes(
+        context["ips"]
+    )
+
+    unique_asns = _deduplicate_nodes(
+        context["asns"]
+    )
+
+    unique_organizations = _deduplicate_nodes(
+        context["organizations"]
+    )
+
+    unique_certificates = _deduplicate_nodes(
+        context["certificates"]
+    )
+
+    infrastructure = _build_infrastructure(
+        context
+    )
+
+    statistics = {
+        "subdomains": len(
+            unique_subdomains
+        ),
+
+        "ip_addresses": len(
+            unique_ips
+        ),
+
+        "asns": len(
+            unique_asns
+        ),
+
+        "organizations": len(
+            unique_organizations
+        ),
+
+        "certificates": len(
+            unique_certificates
+        ),
+
+        "open_ports": int(
+            relationship_counts.get(
+                "HAS_OPEN_PORT",
+                0,
+            )
+        ),
+    }
+
+    ip_versions = _ip_version_summary(
+        unique_ips
+    )
+
+    subdomain_patterns = (
+        _subdomain_pattern_analysis(
+            unique_subdomains,
+            actual_domain,
+        )
+    )
+
+    port_scan = _build_port_scan_analysis(
+        context,
+        relationship_counts,
+    )
+
+    virustotal = _extract_virustotal(
+        domain_properties
+    )
+
+    observations = _generate_observations(
+        statistics=statistics,
+        ip_versions=ip_versions,
+        subdomain_patterns=subdomain_patterns,
+        infrastructure=infrastructure,
+        port_scan=port_scan,
+        virustotal=virustotal,
+    )
+
+    return {
+        "domain": actual_domain,
+
+        "statistics": statistics,
+
+        "relationships": relationship_counts,
+
+        "ip_version_summary": ip_versions,
+
+        "subdomain_patterns": subdomain_patterns,
+
+        "infrastructure": infrastructure,
+
+        "port_scan": port_scan,
+
+        "virustotal": virustotal,
+
+        "observations": observations,
+    }
+
+
+# ============================================================
+# CYTOSCAPE GRAPH
+# ============================================================
+
+def _add_cytoscape_node(
+    node: Any,
+    node_type: str,
+    nodes_output: List[Dict[str, Any]],
+    node_id_map: Dict[str, str],
+    used_graph_ids: Dict[str, str],
+) -> str:
+    """
+    Add one Neo4j node to Cytoscape output.
+    """
+
+    element_id = _node_element_id(
+        node
+    )
+
+    if not element_id:
+        return ""
+
+    if element_id in node_id_map:
+        return node_id_map[
+            element_id
+        ]
+
+    value = _node_identifier_value(
+        node,
+        node_type,
+    )
+
+    if value:
+        cleaned = re.sub(
+            r"[^A-Za-z0-9_.:@/-]+",
+            "_",
+            value,
+        )
+
+        candidate = (
+            f"{node_type.lower()}:{cleaned}"
+        )
+
+        if candidate not in used_graph_ids:
+            graph_id = candidate
+
+        elif (
+            used_graph_ids[candidate]
+            == element_id
+        ):
+            graph_id = candidate
+
+        else:
+            graph_id = (
+                f"{node_type.lower()}:"
+                f"{element_id}"
+            )
+
+    else:
+        graph_id = (
+            f"{node_type.lower()}:"
+            f"{element_id}"
+        )
+
+    used_graph_ids[
+        graph_id
+    ] = element_id
+
+    node_id_map[
+        element_id
+    ] = graph_id
+
+    nodes_output.append(
+        {
+            "data": {
+                "id": graph_id,
+
+                "label": _node_display_label(
+                    node,
+                    node_type,
                 ),
 
-                "open_ports_by_ip":
-                    open_ports_by_ip,
+                "type": node_type,
 
-                "port_banners":
-                    port_banners,
-
-                "unique_port_count":
-                    port_distribution[
-                        "unique_port_count"
-                    ],
-
-                "unique_ports":
-                    port_distribution[
-                        "unique_ports"
-                    ],
-
-                "most_common_ports":
-                    port_distribution[
-                        "most_common_ports"
-                    ],
-
-                "conventional_services":
-                    port_distribution[
-                        "conventional_services"
-                    ],
-
-                "ports_per_ip":
-                    port_distribution[
-                        "ports_per_ip"
-                    ],
-
-                "max_ports_on_single_ip":
-                    port_distribution[
-                        "max_ports_on_single_ip"
-                    ],
-
-                "average_ports_per_exposed_ip":
-                    port_distribution[
-                        "average_ports_per_exposed_ip"
-                    ]
+                "properties": _json_safe(
+                    _node_properties(node)
+                ),
             }
+        }
+    )
 
-            # ==================================================
-            # 6. ASNs
-            # ==================================================
+    return graph_id
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                      -[:RESOLVES_TO]->
-                      (ip:IPAddress)
-                      -[:BELONGS_TO_ASN]->
-                      (asn:ASN)
 
-                RETURN DISTINCT asn.value AS asn
-                ORDER BY asn
-                """,
-                domain=domain
-            )
+def _add_cytoscape_edge(
+    relationship: Any,
+    node_id_map: Dict[str, str],
+    edges_output: List[Dict[str, Any]],
+    used_relationship_ids: set,
+) -> None:
+    """
+    Add one actual directed Neo4j relationship.
+    """
 
-            asns = [
-                record["asn"]
-                for record in result
-                if record["asn"]
-            ]
+    if relationship is None:
+        return
 
-            # ==================================================
-            # 7. ORGANIZATIONS
-            # ==================================================
+    relationship_id = (
+        _relationship_element_id(
+            relationship
+        )
+    )
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                      -[:RESOLVES_TO]->
-                      (ip:IPAddress)
-                      -[:ASSOCIATED_WITH]->
-                      (org:Organization)
+    if not relationship_id:
+        return
 
-                RETURN DISTINCT org.value AS organization
-                ORDER BY organization
-                """,
-                domain=domain
-            )
+    if relationship_id in used_relationship_ids:
+        return
 
-            organizations = [
-                record["organization"]
-                for record in result
-                if record["organization"]
-            ]
+    try:
+        start_node = relationship.start_node
+        end_node = relationship.end_node
 
-            # ==================================================
-            # 8. CERTIFICATES
-            # ==================================================
+        start_id = _node_element_id(
+            start_node
+        )
 
-            result = session.run(
-                """
-                MATCH (d:Domain {value: $domain})
-                      -[:HAS_CERTIFICATE]->
-                      (cert:Certificate)
+        end_id = _node_element_id(
+            end_node
+        )
 
-                RETURN DISTINCT cert.value AS certificate
-                ORDER BY certificate
-                """,
-                domain=domain
-            )
+    except Exception:
+        return
 
-            certificates = [
-                record["certificate"]
-                for record in result
-                if record["certificate"]
-            ]
+    source = node_id_map.get(
+        start_id
+    )
 
-            # ==================================================
-            # 9. RELATIONSHIP COUNTS
-            # ==================================================
+    target = node_id_map.get(
+        end_id
+    )
 
-            relationship_counts = {}
+    if not source or not target:
+        return
 
-            relationship_queries = {
+    relationship_type = (
+        _relationship_type(
+            relationship
+        )
+    )
 
-                "HAS_SUBDOMAIN": """
-                    MATCH (d:Domain {value: $domain})
-                          -[r:HAS_SUBDOMAIN]->
-                          (:Subdomain)
+    used_relationship_ids.add(
+        relationship_id
+    )
 
-                    RETURN count(r) AS count
-                """,
+    edges_output.append(
+        {
+            "data": {
+                "id": (
+                    f"{relationship_type.lower()}:"
+                    f"{relationship_id}"
+                ),
 
-                "RESOLVES_TO": """
-                    MATCH (d:Domain {value: $domain})
-                          -[r:RESOLVES_TO]->
-                          (:IPAddress)
+                "source": source,
 
-                    RETURN count(r) AS count
-                """,
+                "target": target,
 
-                "BELONGS_TO_ASN": """
-                    MATCH (d:Domain {value: $domain})
-                          -[:RESOLVES_TO]->
-                          (ip:IPAddress)
-                          -[r:BELONGS_TO_ASN]->
-                          (:ASN)
+                "label": relationship_type,
 
-                    RETURN count(r) AS count
-                """,
+                "type": relationship_type,
 
-                "ASSOCIATED_WITH": """
-                    MATCH (d:Domain {value: $domain})
-                          -[:RESOLVES_TO]->
-                          (ip:IPAddress)
-                          -[r:ASSOCIATED_WITH]->
-                          (:Organization)
-
-                    RETURN count(r) AS count
-                """,
-
-                "HAS_CERTIFICATE": """
-                    MATCH (d:Domain {value: $domain})
-                          -[r:HAS_CERTIFICATE]->
-                          (:Certificate)
-
-                    RETURN count(r) AS count
-                """,
-
-                "HAS_OPEN_PORT": """
-                    MATCH (d:Domain {value: $domain})
-                          -[:RESOLVES_TO]->
-                          (ip:IPAddress)
-                          -[r:HAS_OPEN_PORT]->
-                          (:Port)
-
-                    RETURN count(r) AS count
-                """
+                "properties": _json_safe(
+                    _relationship_properties(
+                        relationship
+                    )
+                ),
             }
+        }
+    )
 
-            for relationship_type, query in (
-                relationship_queries.items()
-            ):
 
-                result = session.run(
-                    query,
-                    domain=domain
-                )
+def _build_cytoscape_graph(
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Build the complete target-scoped Cytoscape graph.
+    """
 
-                relationship_record = result.single()
+    nodes_output = []
+    edges_output = []
 
-                relationship_counts[
-                    relationship_type
-                ] = (
-                    relationship_record["count"]
-                    if relationship_record
-                    else 0
-                )
+    node_id_map = {}
+    used_graph_ids = {}
+    used_relationship_ids = set()
 
-            # ==================================================
-            # 10. IP VERSION ANALYSIS
-            # ==================================================
+    # --------------------------------------------------------
+    # DOMAIN
+    # --------------------------------------------------------
 
-            ipv4_count = 0
-            ipv6_count = 0
-            unknown_ip_count = 0
+    _add_cytoscape_node(
+        context["domain_node"],
+        "Domain",
+        nodes_output,
+        node_id_map,
+        used_graph_ids,
+    )
 
-            for ip in ip_addresses:
+    # --------------------------------------------------------
+    # SUBDOMAINS
+    # --------------------------------------------------------
 
-                version = classify_ip_version(ip)
+    for node in _deduplicate_nodes(
+        context["subdomains"]
+    ):
+        _add_cytoscape_node(
+            node,
+            "Subdomain",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
 
-                if version == "IPv4":
-                    ipv4_count += 1
+    # --------------------------------------------------------
+    # IPs
+    # --------------------------------------------------------
 
-                elif version == "IPv6":
-                    ipv6_count += 1
+    for node in _deduplicate_nodes(
+        context["ips"]
+    ):
+        _add_cytoscape_node(
+            node,
+            "IPAddress",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
 
-                else:
-                    unknown_ip_count += 1
+    # --------------------------------------------------------
+    # ASNs
+    # --------------------------------------------------------
 
-            ip_version_summary = {
-                "ipv4": ipv4_count,
-                "ipv6": ipv6_count,
-                "unknown": unknown_ip_count
-            }
+    for node in _deduplicate_nodes(
+        context["asns"]
+    ):
+        _add_cytoscape_node(
+            node,
+            "ASN",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
 
-            # ==================================================
-            # 11. SUBDOMAIN PATTERN ANALYSIS
-            # ==================================================
+    # --------------------------------------------------------
+    # ORGANIZATIONS
+    # --------------------------------------------------------
 
-            subdomain_patterns = analyze_subdomain_structure(
-                subdomains,
-                domain_value
+    for node in _deduplicate_nodes(
+        context["organizations"]
+    ):
+        _add_cytoscape_node(
+            node,
+            "Organization",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
+
+    # --------------------------------------------------------
+    # CERTIFICATES
+    # --------------------------------------------------------
+
+    for node in _deduplicate_nodes(
+        context["certificates"]
+    ):
+        _add_cytoscape_node(
+            node,
+            "Certificate",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
+
+    # --------------------------------------------------------
+    # PORTS
+    # --------------------------------------------------------
+
+    port_nodes = _deduplicate_nodes(
+        [
+            port_node
+            for _, port_node
+            in context["ports"]
+        ]
+    )
+
+    for node in port_nodes:
+        _add_cytoscape_node(
+            node,
+            "Port",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
+
+    # --------------------------------------------------------
+    # SERVICE BANNERS
+    # --------------------------------------------------------
+
+    banner_nodes = _deduplicate_nodes(
+        [
+            banner_node
+            for _, _, banner_node
+            in context["banners"]
+        ]
+    )
+
+    for node in banner_nodes:
+        _add_cytoscape_node(
+            node,
+            "ServiceBanner",
+            nodes_output,
+            node_id_map,
+            used_graph_ids,
+        )
+
+    # --------------------------------------------------------
+    # RELATIONSHIPS
+    # --------------------------------------------------------
+
+    relationships = []
+
+    relationships.extend(
+        context[
+            "subdomain_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "resolve_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "asn_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "organization_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "certificate_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "port_relationships"
+        ]
+    )
+
+    relationships.extend(
+        context[
+            "banner_relationships"
+        ]
+    )
+
+    relationships = (
+        _deduplicate_relationships(
+            relationships
+        )
+    )
+
+    for relationship in relationships:
+        _add_cytoscape_edge(
+            relationship,
+            node_id_map,
+            edges_output,
+            used_relationship_ids,
+        )
+
+    return {
+        "nodes": nodes_output,
+        "edges": edges_output,
+    }
+
+
+# ============================================================
+# PUBLIC FUNCTION: GRAPH
+# ============================================================
+
+def get_domain_graph(
+    domain: str,
+    password: str,
+) -> Dict[str, Any]:
+    """
+    Return Cytoscape-compatible graph data.
+
+    Signature intentionally preserved:
+        get_domain_graph(domain, password)
+    """
+
+    driver = GraphDatabase.driver(
+        NEO4J_URI,
+        auth=(
+            NEO4J_USERNAME,
+            password,
+        ),
+    )
+
+    try:
+        with driver.session(
+            database="neo4j"
+        ) as session:
+
+            context = _load_graph_context(
+                session,
+                domain,
             )
 
-            # ==================================================
-            # 12. INFRASTRUCTURE METRICS
-            # ==================================================
-
-            infrastructure_metrics = (
-                calculate_infrastructure_metrics(
-                    subdomains,
-                    ip_addresses,
-                    asns,
-                    organizations,
-                    certificates,
-                    open_ports_by_ip
-                )
+            return _build_cytoscape_graph(
+                context
             )
-
-            # ==================================================
-            # 13. GRAPH-DERIVED OBSERVATIONS
-            # ==================================================
-
-            observations = []
-
-            subdomain_count = len(subdomains)
-            ip_count = len(ip_addresses)
-            asn_count = len(asns)
-            organization_count = len(organizations)
-            certificate_count = len(certificates)
-
-            # --------------------------------------------------
-            # Subdomains
-            # --------------------------------------------------
-
-            if subdomain_count > 1000:
-
-                observations.append(
-                    f"The graph contains a large observed "
-                    f"subdomain dataset with "
-                    f"{subdomain_count:,} subdomains."
-                )
-
-            elif subdomain_count > 0:
-
-                observations.append(
-                    f"The graph contains "
-                    f"{subdomain_count:,} observed subdomains."
-                )
-
-            else:
-
-                observations.append(
-                    "No subdomains were observed in the graph."
-                )
-
-            # --------------------------------------------------
-            # IP addresses
-            # --------------------------------------------------
-
-            if ip_count > 1:
-
-                observations.append(
-                    f"The domain resolves to "
-                    f"{ip_count} observed IP addresses."
-                )
-
-            elif ip_count == 1:
-
-                observations.append(
-                    "The domain resolves to one observed "
-                    "IP address."
-                )
-
-            else:
-
-                observations.append(
-                    "No IP addresses were observed for the domain."
-                )
-
-            # --------------------------------------------------
-            # IP version
-            # --------------------------------------------------
-
-            if ipv4_count > 0 and ipv6_count > 0:
-
-                observations.append(
-                    f"Both IPv4 ({ipv4_count}) and IPv6 "
-                    f"({ipv6_count}) addresses are present "
-                    f"in the observed IP dataset."
-                )
-
-            elif ipv4_count > 0:
-
-                observations.append(
-                    f"Only IPv4 addresses were observed "
-                    f"({ipv4_count})."
-                )
-
-            elif ipv6_count > 0:
-
-                observations.append(
-                    f"Only IPv6 addresses were observed "
-                    f"({ipv6_count})."
-                )
-
-            # --------------------------------------------------
-            # Subdomain/IP concentration
-            # --------------------------------------------------
-
-            if subdomain_count > 0 and ip_count > 0:
-
-                observations.append(
-                    f"The observed dataset contains "
-                    f"{infrastructure_metrics['subdomains_per_ip']:.2f} "
-                    f"subdomains per observed IP address."
-                )
-
-            # --------------------------------------------------
-            # ASN relationships
-            # --------------------------------------------------
-
-            if asn_count == 1:
-
-                observations.append(
-                    f"{relationship_counts['BELONGS_TO_ASN']} "
-                    f"observed IP-to-ASN relationships map to "
-                    f"one observed ASN: {asns[0]}."
-                )
-
-            elif asn_count > 1:
-
-                observations.append(
-                    f"The observed IP infrastructure maps to "
-                    f"{asn_count} distinct ASNs."
-                )
-
-            # --------------------------------------------------
-            # Organization relationships
-            # --------------------------------------------------
-
-            if organization_count == 1:
-
-                observations.append(
-                    f"{relationship_counts['ASSOCIATED_WITH']} "
-                    f"observed IP-to-organization relationships "
-                    f"are associated with one observed "
-                    f"organization: {organizations[0]}."
-                )
-
-            elif organization_count > 1:
-
-                observations.append(
-                    f"The observed IP infrastructure has "
-                    f"relationships with "
-                    f"{organization_count} distinct "
-                    f"organizations."
-                )
-
-            # --------------------------------------------------
-            # Certificates
-            # --------------------------------------------------
-
-            if certificate_count > 1:
-
-                observations.append(
-                    f"The graph contains "
-                    f"{certificate_count} certificates associated "
-                    f"with the domain."
-                )
-
-            elif certificate_count == 1:
-
-                observations.append(
-                    "One certificate is associated with "
-                    "the domain."
-                )
-
-            # --------------------------------------------------
-            # Port scan
-            # --------------------------------------------------
-
-            total_open_ports = (
-                port_scan_results[
-                    "total_open_ports"
-                ]
-            )
-
-            exposed_ip_count = (
-                port_scan_results[
-                    "ip_count"
-                ]
-            )
-
-            if total_open_ports > 0:
-
-                observations.append(
-                    f"Port scanning identified "
-                    f"{total_open_ports} open-port observations "
-                    f"across {exposed_ip_count} IP addresses."
-                )
-
-                unique_port_count = (
-                    port_scan_results[
-                        "unique_port_count"
-                    ]
-                )
-
-                observations.append(
-                    f"{unique_port_count} distinct port numbers "
-                    f"were observed."
-                )
-
-                most_common_ports = (
-                    port_scan_results[
-                        "most_common_ports"
-                    ]
-                )
-
-                if most_common_ports:
-
-                    common_ports_text = ", ".join(
-                        f"{item['port']} "
-                        f"({item['count']}x)"
-                        for item in most_common_ports[:3]
-                    )
-
-                    observations.append(
-                        f"The most frequently observed open "
-                        f"ports were: {common_ports_text}."
-                    )
-
-            # --------------------------------------------------
-            # Subdomain naming patterns
-            # --------------------------------------------------
-
-            numeric_count = (
-                subdomain_patterns[
-                    "numeric_leading"
-                ]
-            )
-
-            if numeric_count > 0:
-
-                observations.append(
-                    f"{numeric_count:,} observed subdomains "
-                    f"begin with a numeric character."
-                )
-
-            hyphen_count = (
-                subdomain_patterns[
-                    "contains_hyphen"
-                ]
-            )
-
-            if hyphen_count > 0:
-
-                observations.append(
-                    f"{hyphen_count:,} observed subdomains "
-                    f"contain a hyphen."
-                )
-
-            multi_level_count = (
-                subdomain_patterns[
-                    "multi_level"
-                ]
-            )
-
-            if multi_level_count > 0:
-
-                observations.append(
-                    f"{multi_level_count:,} observed subdomains "
-                    f"contain multiple labels below the target "
-                    f"domain."
-                )
-
-            environment_count = (
-                subdomain_patterns[
-                    "environment_related"
-                ]
-            )
-
-            if environment_count > 0:
-
-                observations.append(
-                    f"{environment_count:,} observed subdomains "
-                    f"match predefined environment-related "
-                    f"naming patterns."
-                )
-
-            service_count = (
-                subdomain_patterns[
-                    "service_related"
-                ]
-            )
-
-            if service_count > 0:
-
-                observations.append(
-                    f"{service_count:,} observed subdomains "
-                    f"match predefined service-related "
-                    f"naming patterns."
-                )
-
-            # --------------------------------------------------
-            # VirusTotal
-            # --------------------------------------------------
-
-            if virustotal:
-
-                malicious = virustotal.get(
-                    "malicious"
-                )
-
-                suspicious = virustotal.get(
-                    "suspicious"
-                )
-
-                harmless = virustotal.get(
-                    "harmless"
-                )
-
-                undetected = virustotal.get(
-                    "undetected"
-                )
-
-                reputation = virustotal.get(
-                    "reputation"
-                )
-
-                registrar = virustotal.get(
-                    "registrar"
-                )
-
-                if malicious is not None:
-
-                    observations.append(
-                        f"VirusTotal reports "
-                        f"{malicious} malicious detections "
-                        f"for the domain."
-                    )
-
-                if suspicious is not None:
-
-                    observations.append(
-                        f"VirusTotal reports "
-                        f"{suspicious} suspicious detections "
-                        f"for the domain."
-                    )
-
-                if harmless is not None:
-
-                    observations.append(
-                        f"VirusTotal reports "
-                        f"{harmless} harmless detections "
-                        f"for the domain."
-                    )
-
-                if undetected is not None:
-
-                    observations.append(
-                        f"VirusTotal reports "
-                        f"{undetected} undetected results "
-                        f"for the domain."
-                    )
-
-                if reputation is not None:
-
-                    observations.append(
-                        f"VirusTotal reports a reputation "
-                        f"score of {reputation}."
-                    )
-
-                if registrar:
-
-                    observations.append(
-                        f"VirusTotal reports the domain "
-                        f"registrar as {registrar}."
-                    )
-
-            # ==================================================
-            # 14. RETURN STRUCTURED ANALYSIS
-            # ==================================================
-
-            return {
-
-                "domain": domain_value,
-
-                "statistics": {
-                    "subdomains": len(subdomains),
-                    "ip_addresses": len(ip_addresses),
-                    "asns": len(asns),
-                    "organizations": len(organizations),
-                    "certificates": len(certificates),
-                    "open_ports":
-                        port_scan_results[
-                            "total_open_ports"
-                        ]
-                },
-
-                "relationships":
-                    relationship_counts,
-
-                "ip_version_summary":
-                    ip_version_summary,
-
-                "subdomain_patterns":
-                    subdomain_patterns,
-
-                "infrastructure_metrics":
-                    infrastructure_metrics,
-
-                "port_scan":
-                    port_scan_results,
-
-                "infrastructure": {
-
-                    "subdomains":
-                        subdomains,
-
-                    "ip_addresses":
-                        ip_addresses,
-
-                    "asns":
-                        asns,
-
-                    "organizations":
-                        organizations,
-
-                    "certificates":
-                        certificates,
-
-                    "open_ports":
-                        open_ports_by_ip
-                },
-
-                "virustotal":
-                    virustotal,
-
-                "observations":
-                    observations
-            }
 
     finally:
         driver.close()
 
 
 # ============================================================
-# COMMAND-LINE EXECUTION
+# PUBLIC FUNCTION: ANALYSIS
+# ============================================================
+
+def get_domain_analysis(
+    domain: str,
+    password: str,
+) -> Dict[str, Any]:
+    """
+    Return complete deterministic graph analysis.
+
+    Signature intentionally preserved:
+        get_domain_analysis(domain, password)
+    """
+
+    driver = GraphDatabase.driver(
+        NEO4J_URI,
+        auth=(
+            NEO4J_USERNAME,
+            password,
+        ),
+    )
+
+    try:
+        with driver.session(
+            database="neo4j"
+        ) as session:
+
+            context = _load_graph_context(
+                session,
+                domain,
+            )
+
+            # IMPORTANT:
+            #
+            # Counts are derived from the exact target-scoped
+            # relationships already loaded above.
+            #
+            # This avoids broad Cypher traversals and prevents
+            # HAS_BANNER from being inflated by unrelated paths.
+            relationship_counts = (
+                _get_relationship_counts(
+                    context
+                )
+            )
+
+            return _build_domain_analysis(
+                context=context,
+                relationship_counts=relationship_counts,
+                requested_domain=domain,
+            )
+
+    finally:
+        driver.close()
+
+
+# ============================================================
+# CLI OUTPUT
+# ============================================================
+
+def _print_analysis(
+    analysis: Dict[str, Any],
+) -> None:
+    """
+    Print a human-readable analysis.
+    """
+
+    print()
+    print("=" * 70)
+
+    print(
+        f"Domain: "
+        f"{analysis.get('domain', 'Unknown')}"
+    )
+
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # STATISTICS
+    # --------------------------------------------------------
+
+    statistics = analysis.get(
+        "statistics",
+        {},
+    )
+
+    print()
+    print("Statistics:")
+
+    print(
+        f"  subdomains: "
+        f"{statistics.get('subdomains', 0)}"
+    )
+
+    print(
+        f"  ip_addresses: "
+        f"{statistics.get('ip_addresses', 0)}"
+    )
+
+    print(
+        f"  asns: "
+        f"{statistics.get('asns', 0)}"
+    )
+
+    print(
+        f"  organizations: "
+        f"{statistics.get('organizations', 0)}"
+    )
+
+    print(
+        f"  certificates: "
+        f"{statistics.get('certificates', 0)}"
+    )
+    print()
+    print("Certificate Details:")
+
+    certificate_details = (
+        analysis
+        .get("infrastructure", {})
+        .get("certificate_details", [])
+    )
+
+    print(
+        json.dumps(
+            certificate_details,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    print(
+        f"  open_ports: "
+        f"{statistics.get('open_ports', 0)}"
+    )
+
+    # --------------------------------------------------------
+    # RELATIONSHIPS
+    # --------------------------------------------------------
+
+    relationships = analysis.get(
+        "relationships",
+        {},
+    )
+
+    print()
+    print("Relationship Summary:")
+
+    for relationship_type in [
+        "HAS_SUBDOMAIN",
+        "RESOLVES_TO",
+        "BELONGS_TO_ASN",
+        "ASSOCIATED_WITH",
+        "HAS_CERTIFICATE",
+        "HAS_OPEN_PORT",
+        "HAS_BANNER",
+    ]:
+        print(
+            f"  {relationship_type}: "
+            f"{relationships.get(relationship_type, 0)}"
+        )
+
+    # --------------------------------------------------------
+    # IP VERSION
+    # --------------------------------------------------------
+
+    ip_versions = analysis.get(
+        "ip_version_summary",
+        {},
+    )
+
+    print()
+    print("IP Version Summary:")
+
+    print(
+        f"  IPv4: "
+        f"{ip_versions.get('ipv4', 0)}"
+    )
+
+    print(
+        f"  IPv6: "
+        f"{ip_versions.get('ipv6', 0)}"
+    )
+
+    print(
+        f"  Unknown: "
+        f"{ip_versions.get('unknown', 0)}"
+    )
+
+    # --------------------------------------------------------
+    # SUBDOMAIN PATTERNS
+    # --------------------------------------------------------
+
+    patterns = analysis.get(
+        "subdomain_patterns",
+        {},
+    )
+
+    print()
+    print("Subdomain Pattern Analysis:")
+
+    print(
+        f"  Numeric-leading: "
+        f"{patterns.get('numeric_leading', 0)}"
+    )
+
+    print(
+        f"  Contains hyphen: "
+        f"{patterns.get('contains_hyphen', 0)}"
+    )
+
+    print(
+        f"  Deep / Multi-level: "
+        f"{patterns.get('deep_subdomains', 0)}"
+    )
+
+    # --------------------------------------------------------
+    # PORT SCAN
+    # --------------------------------------------------------
+
+    port_scan = analysis.get(
+        "port_scan",
+        {},
+    )
+
+    print()
+    print("TCP Port Scan:")
+
+    print(
+        f"  Scanned IPs: "
+        f"{len(port_scan.get('scanned_ips', []))}"
+    )
+
+    print(
+        f"  Open Ports: "
+        f"{port_scan.get('total_open_ports', 0)}"
+    )
+
+    print(
+        f"  IPs With Open Ports: "
+        f"{port_scan.get('ips_with_open_ports', 0)}"
+    )
+
+    print(
+        f"  Ports With Banners: "
+        f"{port_scan.get('ports_with_banners', 0)}"
+    )
+
+    print(
+        f"  Banner Coverage: "
+        f"{port_scan.get('banner_coverage_percentage', 0.0):.1f}%"
+    )
+
+    # --------------------------------------------------------
+    # VIRUSTOTAL
+    # --------------------------------------------------------
+
+    virustotal = analysis.get(
+        "virustotal",
+        {},
+    )
+
+    if virustotal.get(
+        "available",
+        False,
+    ):
+        print()
+        print("VirusTotal:")
+
+        print(
+            f"  Risk Score: "
+            f"{virustotal.get('risk_score', 0)}/100"
+        )
+
+        print(
+            f"  Malicious: "
+            f"{virustotal.get('malicious', 0)}"
+        )
+
+        print(
+            f"  Suspicious: "
+            f"{virustotal.get('suspicious', 0)}"
+        )
+
+        print(
+            f"  Harmless: "
+            f"{virustotal.get('harmless', 0)}"
+        )
+
+        print(
+            f"  Undetected: "
+            f"{virustotal.get('undetected', 0)}"
+        )
+
+        print(
+            f"  Timeout: "
+            f"{virustotal.get('timeout', 0)}"
+        )
+
+        print(
+            f"  Total Vendors: "
+            f"{virustotal.get('total_vendors', 0)}"
+        )
+
+        registrar = virustotal.get(
+            "registrar",
+            "",
+        )
+
+        if registrar:
+            print(
+                f"  Registrar: "
+                f"{registrar}"
+            )
+
+    # --------------------------------------------------------
+    # OBSERVATIONS
+    # --------------------------------------------------------
+
+    observations = analysis.get(
+        "observations",
+        [],
+    )
+
+    if observations:
+        print()
+        print("Observations:")
+
+        for observation in observations:
+            print(
+                f"  - {observation}"
+            )
+
+    print()
+    print("=" * 70)
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
+    import getpass
 
-    domain = input(
+    print()
+    print("DomainAtlas Graph Analyzer")
+    print("-" * 40)
+
+    domain_input = input(
         "Enter domain: "
     ).strip()
 
-    password = input(
-        "Enter Neo4j password: "
+    password_input = getpass.getpass(
+        "Neo4j password: "
     )
 
-    print("\n[*] Analyzing graph...")
-
     try:
-
-        analysis = get_domain_analysis(
-            domain,
-            password
+        result = get_domain_analysis(
+            domain_input,
+            password_input,
         )
 
-        if analysis is None:
-
-            print(
-                f"[!] Domain not found in Neo4j: {domain}"
-            )
-
-        else:
-
-            print(
-                "\n[+] Graph analysis complete."
-            )
-
-            # ------------------------------------------------
-            # Domain
-            # ------------------------------------------------
-
-            print("\nDomain:")
-            print(
-                f"  {analysis['domain']}"
-            )
-
-            # ------------------------------------------------
-            # Statistics
-            # ------------------------------------------------
-
-            print("\nStatistics:")
-
-            for key, value in (
-                analysis["statistics"].items()
-            ):
-
-                print(
-                    f"  {key}: {value}"
-                )
-
-            # ------------------------------------------------
-            # Relationships
-            # ------------------------------------------------
-
-            print("\nRelationship Summary:")
-
-            for key, value in (
-                analysis["relationships"].items()
-            ):
-
-                print(
-                    f"  {key}: {value}"
-                )
-
-            # ------------------------------------------------
-            # IP Version
-            # ------------------------------------------------
-
-            print("\nIP Version Summary:")
-
-            print(
-                f"  IPv4: "
-                f"{analysis['ip_version_summary']['ipv4']}"
-            )
-
-            print(
-                f"  IPv6: "
-                f"{analysis['ip_version_summary']['ipv6']}"
-            )
-
-            print(
-                f"  Unknown: "
-                f"{analysis['ip_version_summary']['unknown']}"
-            )
-
-            # ------------------------------------------------
-            # Port Scan
-            # ------------------------------------------------
-
-            print("\nPort Scan Results:")
-
-            port_scan = analysis.get(
-                "port_scan",
-                {}
-            )
-
-            print(
-                f"  IPs with open ports: "
-                f"{port_scan.get('ip_count', 0)}"
-            )
-
-            print(
-                f"  Total open ports: "
-                f"{port_scan.get('total_open_ports', 0)}"
-            )
-
-            print(
-                f"  Unique ports: "
-                f"{port_scan.get('unique_port_count', 0)}"
-            )
-
-            unique_ports = port_scan.get(
-                "unique_ports",
-                []
-            )
-
-            if unique_ports:
-
-                print(
-                    "  Port numbers: "
-                    + ", ".join(unique_ports)
-                )
-
-            most_common_ports = port_scan.get(
-                "most_common_ports",
-                []
-            )
-
-            if most_common_ports:
-
-                print("\n  Most Common Ports:")
-
-                for item in most_common_ports:
-
-                    service = item.get(
-                        "conventional_service"
-                    )
-
-                    service_text = (
-                        f" ({service})"
-                        if service
-                        else ""
-                    )
-
-                    print(
-                        f"    - "
-                        f"{item['port']}: "
-                        f"{item['count']} occurrence(s)"
-                        f"{service_text}"
-                    )
-
-            open_ports = port_scan.get(
-                "open_ports_by_ip",
-                {}
-            )
-
-            if open_ports:
-
-                print("\n  Open Ports by IP:")
-
-                for ip, ports in list(
-                    open_ports.items()
-                )[:10]:
-
-                    print(
-                        f"    {ip}: "
-                        f"{', '.join(ports)}"
-                    )
-
-                if len(open_ports) > 10:
-
-                    print(
-                        f"    ... and "
-                        f"{len(open_ports) - 10} "
-                        f"more IPs"
-                    )
-
-            # ------------------------------------------------
-            # Subdomain Pattern Analysis
-            # ------------------------------------------------
-
-            print(
-                "\nSubdomain Pattern Analysis:"
-            )
-
-            patterns = analysis[
-                "subdomain_patterns"
-            ]
-
-            print(
-                f"  Numeric-leading: "
-                f"{patterns['numeric_leading']}"
-            )
-
-            print(
-                f"  Contains hyphen: "
-                f"{patterns['contains_hyphen']}"
-            )
-
-            print(
-                f"  Multi-level: "
-                f"{patterns['multi_level']}"
-            )
-
-            print(
-                f"  Environment-related: "
-                f"{patterns['environment_related']}"
-            )
-
-            print(
-                f"  Service-related: "
-                f"{patterns['service_related']}"
-            )
-
-            print(
-                f"  Wildcard: "
-                f"{patterns['wildcard']}"
-            )
-
-            print("\n  Common prefixes:")
-
-            for item in patterns[
-                "common_prefixes"
-            ]:
-
-                print(
-                    f"    - {item['prefix']}: "
-                    f"{item['count']}"
-                )
-
-            # ------------------------------------------------
-            # Infrastructure Metrics
-            # ------------------------------------------------
-
-            print(
-                "\nInfrastructure Metrics:"
-            )
-
-            metrics = analysis.get(
-                "infrastructure_metrics",
-                {}
-            )
-
-            print(
-                f"  Subdomains per IP: "
-                f"{metrics.get('subdomains_per_ip', 0)}"
-            )
-
-            print(
-                f"  IPs with open ports: "
-                f"{metrics.get('ips_with_open_ports', 0)}"
-            )
-
-            print(
-                f"  Port exposure percentage: "
-                f"{metrics.get('port_exposure_percentage', 0)}%"
-            )
-
-            # ------------------------------------------------
-            # VirusTotal
-            # ------------------------------------------------
-
-            print(
-                "\nVirusTotal Intelligence:"
-            )
-
-            virustotal = analysis.get(
-                "virustotal",
-                {}
-            )
-
-            if virustotal:
-
-                for field in [
-                    "reputation",
-                    "malicious",
-                    "suspicious",
-                    "harmless",
-                    "undetected",
-                    "timeout",
-                    "registrar",
-                    "source",
-                    "method",
-                    "recorded_at"
-                ]:
-
-                    print(
-                        f"  {field}: "
-                        f"{virustotal.get(field)}"
-                    )
-
-            else:
-
-                print(
-                    "  No VirusTotal intelligence found."
-                )
-
-            # ------------------------------------------------
-            # Observations
-            # ------------------------------------------------
-
-            print(
-                "\nGraph-Derived Observations:"
-            )
-
-            for observation in analysis[
-                "observations"
-            ]:
-
-                print(
-                    f"  - {observation}"
-                )
-
-            # ------------------------------------------------
-            # Infrastructure
-            # ------------------------------------------------
-
-            print("\nInfrastructure:")
-
-            infrastructure = analysis[
-                "infrastructure"
-            ]
-
-            print(
-                f"  Subdomains: "
-                f"{len(infrastructure['subdomains'])}"
-            )
-
-            print("\n  First 20 subdomains:")
-
-            for subdomain in infrastructure[
-                "subdomains"
-            ][:20]:
-
-                print(
-                    f"    - {subdomain}"
-                )
-
-            print("\n  IP Addresses:")
-
-            for ip in infrastructure[
-                "ip_addresses"
-            ]:
-
-                print(
-                    f"    - {ip}"
-                )
-
-            print("\n  ASNs:")
-
-            for asn in infrastructure[
-                "asns"
-            ]:
-
-                print(
-                    f"    - {asn}"
-                )
-
-            print("\n  Organizations:")
-
-            for organization in infrastructure[
-                "organizations"
-            ]:
-
-                print(
-                    f"    - {organization}"
-                )
-
-            print("\n  Certificates:")
-
-            for certificate in infrastructure[
-                "certificates"
-            ]:
-
-                print(
-                    f"    - {certificate}"
-                )
-
-    except Exception as error:
-
+        _print_analysis(
+            result
+        )
+
+    except Exception as exc:
+        print()
         print(
-            f"[!] Graph analysis error: {error}"
+            f"[!] Analysis error: {exc}"
         )

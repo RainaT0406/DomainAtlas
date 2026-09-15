@@ -1,4 +1,3 @@
-
 import json
 import os
 import hashlib
@@ -176,7 +175,6 @@ def add_relationship(
         new_relationship["properties"] = properties
 
     relationships.append(new_relationship)
-
     relationship_index[
         relationship_key
     ] = new_relationship
@@ -187,10 +185,8 @@ def add_relationship(
 # =============================================================
 
 def normalize_data(data):
-
     entities = []
     relationships = []
-
     entity_index = {}
     relationship_index = {}
 
@@ -262,9 +258,7 @@ def normalize_data(data):
             # -------------------------------------------------
 
             if sources:
-
                 for source in sources:
-
                     add_entity(
                         entities,
                         entity_index,
@@ -274,9 +268,7 @@ def normalize_data(data):
                         "Subdomain discovery",
                         recorded_at,
                     )
-
             else:
-
                 add_entity(
                     entities,
                     entity_index,
@@ -292,9 +284,7 @@ def normalize_data(data):
             # -------------------------------------------------
 
             if sources:
-
                 for source in sources:
-
                     add_relationship(
                         relationships,
                         relationship_index,
@@ -307,9 +297,7 @@ def normalize_data(data):
                         "Subdomain discovery",
                         recorded_at,
                     )
-
             else:
-
                 add_relationship(
                     relationships,
                     relationship_index,
@@ -439,7 +427,6 @@ def normalize_data(data):
             asn = str(asn).strip()
 
             if asn:
-
                 add_entity(
                     entities,
                     entity_index,
@@ -600,14 +587,11 @@ def normalize_data(data):
                 # Port value
                 # -------------------------------------------------
 
-                port_value = (
-                    f"{port}/{protocol}"
-                )
+                port_value = f"{port}/{protocol}"
 
                 # -------------------------------------------------
                 # Port entity
                 #
-                # IMPORTANT:
                 # Store service information as properties so
                 # Neo4j/frontend can display:
                 #
@@ -662,8 +646,7 @@ def normalize_data(data):
 
                     # Deterministic hash.
                     #
-                    # SHA-256 is preferable to MD5 here because
-                    # this is simply being used as an identifier.
+                    # SHA-256 is used as an identifier.
                     banner_hash = hashlib.sha256(
                         banner.encode("utf-8")
                     ).hexdigest()[:16]
@@ -711,11 +694,14 @@ def normalize_data(data):
     # CERTIFICATES
     # =========================================================
 
+        # =========================================================
+    # CERTIFICATES
+    # =========================================================
+
     for certificate in data.get(
         "certificates",
         [],
     ):
-
         if not isinstance(
             certificate,
             dict,
@@ -733,6 +719,42 @@ def normalize_data(data):
             certificate_id
         ).strip()
 
+        if not certificate_id:
+            continue
+
+        # -----------------------------------------------------
+        # Certificate metadata
+        # -----------------------------------------------------
+
+        certificate_sha256 = certificate.get(
+            "certificate_sha256"
+        )
+
+        public_key_sha256 = certificate.get(
+            "public_key_sha256"
+        )
+
+        not_before = certificate.get(
+            "not_before"
+        )
+
+        not_after = certificate.get(
+            "not_after"
+        )
+
+        revoked = certificate.get(
+            "revoked",
+            False,
+        )
+
+        # -----------------------------------------------------
+        # Certificate entity
+        #
+        # Store certificate metadata as properties so it can
+        # be displayed in Neo4j/frontend without creating
+        # unnecessary additional nodes.
+        # -----------------------------------------------------
+
         add_entity(
             entities,
             entity_index,
@@ -741,7 +763,18 @@ def normalize_data(data):
             "Certificate Transparency",
             "Cert Spotter certificate lookup",
             recorded_at,
+            properties={
+                "certificate_sha256": certificate_sha256,
+                "public_key_sha256": public_key_sha256,
+                "not_before": not_before,
+                "not_after": not_after,
+                "revoked": bool(revoked),
+            },
         )
+
+        # -----------------------------------------------------
+        # Domain → HAS_CERTIFICATE → Certificate
+        # -----------------------------------------------------
 
         add_relationship(
             relationships,
@@ -755,7 +788,6 @@ def normalize_data(data):
             "Cert Spotter certificate lookup",
             recorded_at,
         )
-
     # =========================================================
     # VIRUSTOTAL INTELLIGENCE
     # =========================================================
@@ -793,43 +825,194 @@ def normalize_data(data):
         )
 
         # -----------------------------------------------------
-        # Analysis Statistics
+        # RISK SCORE
+        #
+        # New VirusTotal collector format:
+        #
+        # {
+        #     "risk_score": 65
+        # }
+        #
+        # Keep the value if it is present.
         # -----------------------------------------------------
 
-        analysis_stats = virustotal_data.get(
+        risk_score = virustotal_data.get(
+            "risk_score"
+        )
+
+        if risk_score is not None:
+            try:
+                risk_score = float(risk_score)
+
+                # Store as integer when the score is a
+                # whole number.
+                if risk_score.is_integer():
+                    risk_score = int(risk_score)
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                risk_score = None
+
+        normalized_virustotal[
+            "risk_score"
+        ] = risk_score
+
+        # -----------------------------------------------------
+        # ANALYSIS STATISTICS
+        #
+        # Preferred format:
+        #
+        # "security_summary": {
+        #     "malicious": 17,
+        #     "suspicious": 1,
+        #     "harmless": 71,
+        #     "undetected": 0,
+        #     "timeout": 0,
+        #     "total_vendors": 89
+        # }
+        #
+        # Backward compatibility:
+        #
+        # "last_analysis_stats": {
+        #     ...
+        # }
+        # -----------------------------------------------------
+
+        security_summary = virustotal_data.get(
+            "security_summary",
+            {},
+        )
+
+        if not isinstance(
+            security_summary,
+            dict,
+        ):
+            security_summary = {}
+
+        last_analysis_stats = virustotal_data.get(
             "last_analysis_stats",
             {},
         )
 
         if not isinstance(
-            analysis_stats,
+            last_analysis_stats,
             dict,
         ):
-            analysis_stats = {}
+            last_analysis_stats = {}
+
+        # Prefer security_summary when available.
+        if security_summary:
+
+            analysis_stats = security_summary
+
+        else:
+
+            analysis_stats = last_analysis_stats
+
+        # -----------------------------------------------------
+        # Individual detection counts
+        # -----------------------------------------------------
+
+        malicious = analysis_stats.get(
+            "malicious",
+            0,
+        )
+
+        suspicious = analysis_stats.get(
+            "suspicious",
+            0,
+        )
+
+        harmless = analysis_stats.get(
+            "harmless",
+            0,
+        )
+
+        undetected = analysis_stats.get(
+            "undetected",
+            0,
+        )
+
+        timeout = analysis_stats.get(
+            "timeout",
+            0,
+        )
+
+        # Safely convert counts to integers.
+        def safe_int(value, default=0):
+            try:
+                return int(value)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return default
+
+        malicious = safe_int(malicious)
+        suspicious = safe_int(suspicious)
+        harmless = safe_int(harmless)
+        undetected = safe_int(undetected)
+        timeout = safe_int(timeout)
+
+        # -----------------------------------------------------
+        # Total vendors
+        #
+        # Use collector-provided total_vendors when available.
+        # Otherwise calculate it from the individual counts.
+        # -----------------------------------------------------
+
+        total_vendors = analysis_stats.get(
+            "total_vendors"
+        )
+
+        if total_vendors is None:
+            total_vendors = (
+                malicious
+                + suspicious
+                + harmless
+                + undetected
+                + timeout
+            )
+        else:
+            total_vendors = safe_int(
+                total_vendors,
+                malicious
+                + suspicious
+                + harmless
+                + undetected
+                + timeout,
+            )
+
+        # -----------------------------------------------------
+        # Store normalized security summary
+        # -----------------------------------------------------
+
+        normalized_virustotal[
+            "security_summary"
+        ] = {
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+            "timeout": timeout,
+            "total_vendors": total_vendors,
+        }
+
+        # -----------------------------------------------------
+        # Also preserve last_analysis_stats for
+        # backward compatibility with existing code.
+        # -----------------------------------------------------
 
         normalized_virustotal[
             "last_analysis_stats"
         ] = {
-            "malicious": analysis_stats.get(
-                "malicious",
-                0,
-            ),
-            "suspicious": analysis_stats.get(
-                "suspicious",
-                0,
-            ),
-            "harmless": analysis_stats.get(
-                "harmless",
-                0,
-            ),
-            "undetected": analysis_stats.get(
-                "undetected",
-                0,
-            ),
-            "timeout": analysis_stats.get(
-                "timeout",
-                0,
-            ),
+            "malicious": malicious,
+            "suspicious": suspicious,
+            "harmless": harmless,
+            "undetected": undetected,
+            "timeout": timeout,
         }
 
         # -----------------------------------------------------
@@ -883,12 +1066,21 @@ def normalize_data(data):
 
         # -----------------------------------------------------
         # DNS Records
+        #
+        # Support both:
+        #   dns_records
+        #   last_dns_records
         # -----------------------------------------------------
 
         dns_records = virustotal_data.get(
-            "last_dns_records",
-            [],
+            "dns_records"
         )
+
+        if dns_records is None:
+            dns_records = virustotal_data.get(
+                "last_dns_records",
+                [],
+            )
 
         if not isinstance(
             dns_records,
@@ -896,6 +1088,11 @@ def normalize_data(data):
         ):
             dns_records = []
 
+        normalized_virustotal[
+            "dns_records"
+        ] = dns_records
+
+        # Keep the old field too for compatibility.
         normalized_virustotal[
             "last_dns_records"
         ] = dns_records
@@ -934,6 +1131,52 @@ def normalize_data(data):
         normalized_virustotal[
             "recorded_at"
         ] = recorded_at
+
+        # -----------------------------------------------------
+        # DEBUG OUTPUT
+        #
+        # This confirms that the normalizer has retained the
+        # values before Neo4j loading.
+        # -----------------------------------------------------
+
+        print(
+            "[+] VirusTotal normalized."
+        )
+
+        print(
+            f"    Risk Score: "
+            f"{normalized_virustotal.get('risk_score')}/100"
+        )
+
+        print(
+            f"    Malicious: "
+            f"{malicious}"
+        )
+
+        print(
+            f"    Suspicious: "
+            f"{suspicious}"
+        )
+
+        print(
+            f"    Harmless: "
+            f"{harmless}"
+        )
+
+        print(
+            f"    Undetected: "
+            f"{undetected}"
+        )
+
+        print(
+            f"    Timeout: "
+            f"{timeout}"
+        )
+
+        print(
+            f"    Total Vendors: "
+            f"{total_vendors}"
+        )
 
     # =========================================================
     # FINAL OUTPUT

@@ -1,0 +1,316 @@
+/* ============================================================
+   AI REPORT — RAINFOREST WHITE
+   ============================================================ */
+
+.ai-report {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* ---------- HEADER ---------- */
+
+.ai-report-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-report-header-left {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.ai-report-emblem {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--forest-mid);
+  color: var(--forest-mid);
+  box-shadow: 0 4px 10px rgba(42, 106, 58, 0.12);
+  flex-shrink: 0;
+}
+
+.ai-report-eyebrow {
+  font-size: 9px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--forest-mid);
+  font-weight: 800;
+  margin: 0 0 3px 0;
+}
+
+.ai-report-title {
+  font-size: 17px;
+  font-weight: 750;
+  color: var(--text);
+  margin: 0 0 5px 0;
+  letter-spacing: -0.3px;
+}
+
+.ai-report-subtitle {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.55;
+}
+
+.ai-report-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-engine-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--forest-mid);
+  background: var(--surface);
+  border: 1px solid var(--forest-mid);
+  white-space: nowrap;
+}
+
+/* ---------- META STRIP ---------- */
+
+.ai-report-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ai-report-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.ai-report-meta-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 800;
+}
+
+.ai-report-meta-label svg {
+  color: var(--forest-mid);
+}
+
+.ai-report-meta-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  word-break: break-all;
+  letter-spacing: -0.1px;
+}
+
+/* ---------- BODY ---------- */
+
+.ai-report-body {
+  padding: 22px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  line-height: 1.75;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.ai-report-heading {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--forest-dark);
+  margin: 22px 0 10px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-report-heading::before {
+  content: "";
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--forest-mid);
+  flex-shrink: 0;
+}
+
+.ai-report-heading:first-child {
+  margin-top: 0;
+}
+
+.ai-report-subheading {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--forest-mid);
+  margin: 18px 0 8px 0;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.ai-report-paragraph {
+  margin: 0 0 10px 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.75;
+  text-wrap: pretty;
+}
+
+.ai-report-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.ai-report-list,
+.ai-report-ordered {
+  margin: 6px 0 12px 0;
+  padding-left: 20px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.ai-report-list li,
+.ai-report-ordered li {
+  margin-bottom: 5px;
+  line-height: 1.7;
+}
+
+.ai-report-list li::marker,
+.ai-report-ordered li::marker {
+  color: var(--forest-mid);
+  font-weight: 800;
+}
+
+.ai-report-list li strong,
+.ai-report-ordered li strong {
+  color: var(--text);
+}
+
+/* ---------- INLINE ---------- */
+
+.ai-report-body strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.ai-report-inline-code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  color: var(--forest-dark);
+}
+
+.ai-report-code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  padding: 12px 14px;
+  border-radius: 7px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  overflow-x: auto;
+  margin: 12px 0;
+  line-height: 1.6;
+}
+
+.ai-report-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+  padding: 36px 20px;
+  margin: 0;
+  font-size: 11px;
+}
+
+/* ---------- LIMITATION FOOTER ---------- */
+
+.ai-report-limitation {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--forest-mid);
+  border-radius: 7px;
+  color: var(--text-muted);
+}
+
+.ai-report-limitation svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--forest-mid);
+}
+
+.ai-report-limitation strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.ai-report-limitation span {
+  display: block;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+
+/* ---------- RESPONSIVE ---------- */
+
+@media (max-width: 720px) {
+  .ai-report-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ai-report-header-right {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .ai-report-body {
+    padding: 18px 16px;
+    font-size: 11.5px;
+  }
+
+  .ai-report-title {
+    font-size: 15px;
+  }
+
+  .ai-report-meta {
+    grid-template-columns: 1fr;
+  }
+}
