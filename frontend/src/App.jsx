@@ -40,7 +40,10 @@ import StatCard from "./components/StatCard";
 import InfoRow from "./components/InfoRow";
 import PatternCard from "./components/PatternCard";
 import AIReport from "./components/AIReport";
-
+import ScanTimer from "./components/ScanTimer";
+import {
+  useScanTimer,
+} from "./utils/useScanTimer";
 import {
   normalizeAnalysisData,
 } from "./utils/analysisData";
@@ -72,7 +75,10 @@ function App() {
   const [progress, setProgress] =
     useState([]);
 
-
+  const {
+  elapsed: scanElapsed,
+  finalTime: scanFinalTime,
+} = useScanTimer(loading);
 
   const [showIntro, setShowIntro] =
     useState(true);
@@ -1802,9 +1808,10 @@ const completedScanId =
                 </div>
 
                 <div className="pipeline-header-right">
-
-               
-
+                    <ScanTimer
+                        running={loading}
+                        elapsed={scanElapsed}
+                      />
                   <button
                     className="stop-button"
                     onClick={
@@ -2047,15 +2054,10 @@ const completedScanId =
                   </p>
                 </div>
 
-                <div className="analysis-complete">
-                  <Activity
-                    size={16}
+                  <ScanTimer
+                    completed={!loading && !!analysis}
+                    finalTime={scanFinalTime}
                   />
-
-                  <span>
-                    COMPLETE
-                  </span>
-                </div>
 
               </section>
 
@@ -2526,8 +2528,8 @@ const completedScanId =
 
     </div>
 
+<div className="certificate-scroll">
   <div className="certificate-grid">
-
   {certificateDetails.length > 0 ? (
     certificateDetails.map(
       (certificate, index) => {
@@ -2716,6 +2718,7 @@ const completedScanId =
 
   )}
 
+</div>
 </div>
 
   </div>

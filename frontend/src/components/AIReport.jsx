@@ -101,17 +101,7 @@ function AIReport({
         )}
       </article>
 
-      <footer className="ai-report-limitation">
-        <Shield size={17} />
-        <div>
-          <strong>Analytical Limitation</strong>
-          <span>
-            This report reflects only the collected OSINT data and does
-            not establish ownership, maliciousness, benignness, or
-            security posture.
-          </span>
-        </div>
-      </footer>
+
     </div>
   );
 }

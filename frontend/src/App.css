@@ -1161,9 +1161,24 @@ section {
    CERTIFICATE INVENTORY
    ========================================================= */
 
+.certificate-scroll {
+  max-height: 520px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.certificate-scroll .certificate-grid {
+  padding: 10px;
+  gap: 10px;
+}
+
 .certificate-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -2907,4 +2922,36 @@ section {
   font-weight: 700;
   letter-spacing: 0.08em;
   color: #9ca3af;
+}
+
+.scan-time {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.scan-time > svg {
+  flex-shrink: 0;
+}
+
+.scan-time-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scan-time-content span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+}
+
+.scan-time-content strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }

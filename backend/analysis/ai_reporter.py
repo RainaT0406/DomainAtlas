@@ -59,7 +59,7 @@ OLLAMA_TIMEOUT = int(
 OLLAMA_MAX_TOKENS = int(
     os.getenv(
         "OLLAMA_MAX_TOKENS",
-        "220",
+        "500",
     )
 )
 
@@ -818,41 +818,62 @@ def format_authoritative_facts(deterministic: Dict[str, Any]) -> str:
 SYSTEM_PROMPT = """
 You are the AI-assisted interpretation component of DomainAtlas.
 
-Write ONLY one concise factual paragraph of 3 to 5 sentences from the
-verified facts supplied by DomainAtlas.
+Your task is to transform verified DomainAtlas observations into concise,
+section-specific intelligence prose.
+
+Return EXACTLY these five labeled sections and nothing else:
+
+DOMAIN_INFRASTRUCTURE:
+NETWORK_RELATIONSHIPS:
+ORGANIZATIONAL_ASSOCIATIONS:
+CERTIFICATE_OBSERVATIONS:
+INFRASTRUCTURE_PATTERNS:
+
+Each label must be followed by one concise paragraph of 2 to 4 sentences.
 
 STRICT RULES:
+
 - The supplied DomainAtlas facts are the only source of truth.
-- Preserve every number exactly. In particular, if Open TCP ports=4,
-  you must say 4 open TCP ports, not 2.
-- Do not recalculate, reinterpret, estimate, or generalize counts.
-- Describe ports as observations of IP:port pairs. Two unique port numbers
-  can still represent more than two open TCP observations across multiple IPs.
-- Preserve the scanner service labels exactly. Do not infer HTTPS from
-  port 443, and do not infer a service from a conventional port number.
-- A 100% banner coverage value means a banner was observed for every
-  represented open-port observation. It does NOT imply many services,
-  service diversity, complexity, security, or any other property.
-- VirusTotal results are external multi-vendor observations only. State
-  the reported/calculated score and detection counts without interpreting
-  them as an overall risk or security rating.
-- Do not claim or imply that the domain is safe, unsafe, secure, insecure,
-  low-risk, high-risk, malicious, benign, compromised, vulnerable, or has
-  any particular security posture.
-- Do not infer ownership, hosting-provider role, hosting-service status,
-  application type, website purpose, infrastructure complexity, or intent.
-- Do not infer security properties from certificates or HTTPS.
-- Do not use phrases such as "appears to", "seems to", "suggests",
-  "indicates", "may indicate", or "could indicate" to make an unsupported
-  inference about security, hosting, application type, complexity, or risk.
-- Do not create headings, lists, recommendations, warnings, or new facts.
+- Deterministic DomainAtlas counts are authoritative.
+- Preserve numerical values exactly.
+- Do not invent, estimate, recalculate, or reinterpret counts.
+- Do not list all subdomains, IP addresses, certificate identifiers, or
+  port observations. Synthesize recurring patterns and relationships
+  instead.
+- Use supplied subdomain pattern analysis when discussing namespace
+  structure.
+- If pattern information is unavailable, describe only the structural
+  observations that are actually supplied.
+- Describe TCP observations as IP:port observations.
+- Preserve scanner-provided service labels exactly.
+- Never infer a service from a conventional port number.
+- Do not call port 443 HTTPS unless HTTPS was explicitly supplied as the
+  observed service.
+- Banner observations describe collected response/banner data only.
+- Banner coverage describes the proportion of represented open TCP
+  observations for which a banner was obtained. Do not interpret it as
+  security, complexity, service diversity, or reliability.
+- VirusTotal values are external multi-vendor observations only.
+- Report VirusTotal detection counts and vendor counts exactly when used.
+- Do not turn a VirusTotal score into an overall risk or security rating.
+- Do not claim that the domain is safe, unsafe, secure, insecure,
+  malicious, benign, compromised, vulnerable, or has a particular
+  security posture.
+- Do not infer domain ownership.
+- Do not infer that an organization is the owner of the domain.
+- Do not infer hosting-provider role, application type, website purpose,
+  infrastructure complexity, or intent.
+- Do not infer security properties from certificates.
+- Do not use speculative language such as "may indicate", "could indicate",
+  "suggests", "appears to", or "seems to" for unsupported conclusions.
+- Do not provide recommendations or warnings.
+- Do not generate Key Takeaways.
+- Do not generate Markdown headings.
 - Do not repeat the analytical limitation.
+- Keep every statement evidence-bound.
 
-Prefer wording such as "The collected observations show", "The observed
-infrastructure includes", and "VirusTotal reported". The paragraph must
-remain descriptive and evidence-bound.
+The objective is analytical synthesis, not inventory reproduction.
 """
-
 
 # ============================================================
 # USER PROMPT
@@ -884,36 +905,123 @@ def build_user_prompt(deterministic: Dict[str, Any]) -> str:
     facts = deterministic["authoritative_facts"]
     vt = facts["virustotal"]
 
-    services = []
-    for item in facts["port_observations"]:
-        services.append(
-            f"{item['port']}/tcp={item['service']} "
-            f"(banner={'observed' if item.get('banner') else 'not observed'})"
-        )
+    port_lines = format_llm_port_observations(
+        facts["port_observations"]
+    )
 
-    return "\n".join([
-        "VERIFIED DOMAINATLAS FACTS — USE THESE VALUES EXACTLY:",
+    subdomain_patterns = deterministic.get("subdomain_patterns", {})
+    if not isinstance(subdomain_patterns, dict):
+        subdomain_patterns = {}
+
+    infrastructure_metrics = deterministic.get(
+        "infrastructure_metrics",
+        {},
+    )
+    if not isinstance(infrastructure_metrics, dict):
+        infrastructure_metrics = {}
+
+    relationships = deterministic.get("relationships", {})
+    if not isinstance(relationships, dict):
+        relationships = {}
+
+        return "\n".join([
+        "VERIFIED DOMAINATLAS FACTS — THESE VALUES ARE AUTHORITATIVE:",
+        "",
         f"Domain={facts['domain']}",
         f"Subdomains={facts['subdomain_count']}",
-        f"IPs={facts['ip_count']} ({facts['ipv4_count']} IPv4, {facts['ipv6_count']} IPv6, {facts['unknown_ip_count']} unknown)",
-        f"ASNs={', '.join(map(str, facts['asns'])) if facts['asns'] else 'none'}",
-        f"Organizations={', '.join(map(str, facts['organizations'])) if facts['organizations'] else 'none'}",
+        (
+            f"IPs={facts['ip_count']} "
+            f"({facts['ipv4_count']} IPv4, "
+            f"{facts['ipv6_count']} IPv6, "
+            f"{facts['unknown_ip_count']} unknown)"
+        ),
+        (
+            f"ASNs={', '.join(map(str, facts['asns']))}"
+            if facts["asns"]
+            else "ASNs=none"
+        ),
+        (
+            f"Organizations={', '.join(map(str, facts['organizations']))}"
+            if facts["organizations"]
+            else "Organizations=none"
+        ),
         f"Certificates={facts['certificate_count']}",
         f"Scanned IPs={facts['scanned_ip_count']}",
+        f"IPs with open TCP ports={facts['ips_with_open_ports']}",
         f"Open TCP observations={facts['total_open_ports']}",
-        f"IPs with open ports={facts['ips_with_open_ports']}",
         f"Service banners={facts['ports_with_banners']}",
         f"Banner coverage={facts['banner_coverage_percentage']:.2f}%",
-        f"Services={'; '.join(services) if services else 'none'}",
-        f"VirusTotal risk score={vt['risk_score']}/100; malicious={vt['malicious']}; suspicious={vt['suspicious']}; harmless={vt['harmless']}; undetected={vt['undetected']}; timeout={vt['timeout']}; total vendors={vt['total_vendors']}",
-        "TASK: Write exactly 3 to 5 factual sentences about these observations.",
-        f"MANDATORY: State the open TCP observation count as {facts['total_open_ports']} open TCP ports. Do not replace it with the number of unique port numbers.",
-        "MANDATORY: Treat banner coverage only as evidence that banners were or were not observed for the represented open-port observations.",
-        "MANDATORY: Treat VirusTotal only as an external observation; never convert its score or detections into an overall risk or security conclusion.",
-        "MANDATORY: Do not infer hosting, application type, complexity, ownership, purpose, security, safety, maliciousness, benignness, compromise, vulnerability, or intent.",
-        "Return only the paragraph."
+        "",
+        "SUBDOMAIN PATTERN ANALYSIS:",
+        json.dumps(
+            subdomain_patterns,
+            ensure_ascii=False,
+            default=str,
+        ),
+        "",
+        "INFRASTRUCTURE METRICS:",
+        json.dumps(
+            infrastructure_metrics,
+            ensure_ascii=False,
+            default=str,
+        ),
+        "",
+        "GRAPH RELATIONSHIPS:",
+        json.dumps(
+            relationships,
+            ensure_ascii=False,
+            default=str,
+        ),
+        "",
+        "OPEN TCP OBSERVATIONS:",
+        "\n".join(port_lines) if port_lines else "- none",
+        "",
+        "VIRUSTOTAL OBSERVATIONS:",
+        f"Available={vt['available']}",
+        f"Risk score={vt['risk_score']}/100",
+        f"Malicious={vt['malicious']}",
+        f"Suspicious={vt['suspicious']}",
+        f"Harmless={vt['harmless']}",
+        f"Undetected={vt['undetected']}",
+        f"Timeout={vt['timeout']}",
+        f"Total vendors={vt['total_vendors']}",
+        f"Registrar={clean_text(vt.get('registrar'), 'Not available')}",
+        "",
+        "TASK:",
+        "Synthesize the observations into five section-specific paragraphs.",
+        "",
+        "DOMAIN_INFRASTRUCTURE:",
+        "Focus on the discovered namespace and recurring subdomain patterns.",
+        "Do not enumerate all subdomains.",
+        "",
+        "NETWORK_RELATIONSHIPS:",
+        "Focus on IP versions, ASN relationships, scanned IPs, open TCP",
+        "observations, observed services, and banner observations.",
+        "",
+        "ORGANIZATIONAL_ASSOCIATIONS:",
+        "Describe the organizations and ASN associations present in the",
+        "collected data without treating them as domain ownership.",
+        "",
+        "CERTIFICATE_OBSERVATIONS:",
+        "Describe certificate counts and the nature of the certificate",
+        "inventory without listing every certificate identifier.",
+        "",
+        "INFRASTRUCTURE_PATTERNS:",
+        "Synthesize recurring namespace, network, service, banner, and",
+        "environment-oriented patterns that are explicitly supported by",
+        "the supplied observations.",
+        "",
+        "MANDATORY:",
+        f"If discussing open TCP observations, use the authoritative count "
+        f"of {facts['total_open_ports']}.",
+        f"If discussing subdomains, use the authoritative count of "
+        f"{facts['subdomain_count']}.",
+        f"If discussing certificates, use the authoritative count of "
+        f"{facts['certificate_count']}.",
+        "Do not invent missing pattern information.",
+        "Do not provide Key Takeaways.",
+        "Return only the five labeled sections.",
     ])
-
 
 # ============================================================
 # OLLAMA
@@ -1413,33 +1521,69 @@ def validate_security_claims(report: str) -> List[str]:
 
     forbidden_patterns = [
         (r"\bthe\s+domain\s+is\s+malicious\b", "categorical maliciousness claim"),
+
         (r"\bthe\s+domain\s+is\s+benign\b", "categorical benignness claim"),
+
         (r"\bthe\s+domain\s+is\s+safe\b", "categorical safety claim"),
+
         (r"\bthe\s+domain\s+is\s+compromised\b", "categorical compromise claim"),
+
         (r"\bthe\s+domain\s+has\s+been\s+compromised\b", "categorical compromise claim"),
+
         (r"\bthe\s+domain\s+is\s+vulnerable\b", "categorical vulnerability claim"),
+
         (r"\bno\s+security\s+risk\b", "categorical security-risk claim"),
+
         (r"\bcompletely\s+secure\b", "categorical security claim"),
+
         (r"\bfully\s+secure\b", "categorical security claim"),
+
         (r"\bthe\s+domain\s+is\s+secure\b", "categorical security claim"),
-        (r"\b(?:appears|seems)\s+to\s+be\s+(?:a\s+)?hosting\s+service\b",
-         "unsupported hosting-service inference"),
-        (r"\b(?:appears|seems)\s+to\s+have\s+(?:a\s+)?(?:low|high)\s+risk\b",
-         "risk inference"),
-        (r"\b(?:low|high|relatively\s+low|relatively\s+high)\s+risk\s+(?:profile|level)\b",
-         "risk inference"),
-        (r"\b(?:suggests?|indicates?|demonstrates?)\s+(?:that\s+)?(?:the\s+)?domain\s+(?:is|may\s+be|could\s+be|uses?|hosts?)\b",
-         "unsupported domain inference"),
-        (r"\b(?:suggests?|indicates?|could\s+indicate|may\s+indicate)\b[^.]{0,180}\b(?:hosting|hosted|web\s+application|application\s+server|complex\s+infrastructure|security|risk|safe|secure)\b",
-         "infrastructure or security inference"),
-        (r"\b(?:indicat(?:e|ing)|suggest(?:s|ing))\b[^.]{0,180}\b(?:security|secure|risk|safe|safety)\b",
-         "unsupported security inference"),
-        (r"\b(?:certificate|certificates)\b[^.]{0,120}\b(?:security|secure|safe|protection|protected)\b",
-         "unsupported certificate-security inference"),
-        (r"\b(?:hosting\s+web\s+applications?|web\s+applications?\s+are\s+hosted|application\s+hosting)\b",
-         "application-hosting inference"),
-        (r"\b(?:more\s+complex|complex|sophisticated)\s+(?:infrastructure|architecture)\b",
-         "unsupported infrastructure-complexity inference"),
+
+        (
+            r"\b(?:appears|seems)\s+to\s+be\s+(?:a\s+)?hosting\s+service\b",
+            "unsupported hosting-service inference",
+        ),
+
+        (
+            r"\b(?:appears|seems)\s+to\s+have\s+(?:a\s+)?(?:low|high)\s+risk\b",
+            "risk inference",
+        ),
+
+        (
+            r"\b(?:low|high|relatively\s+low|relatively\s+high)\s+risk\s+(?:profile|level)\b",
+            "risk inference",
+        ),
+
+        (
+            r"\b(?:suggests?|indicates?|demonstrates?)\s+(?:that\s+)?(?:the\s+)?domain\s+(?:is|may\s+be|could\s+be|uses?|hosts?)\b",
+            "unsupported domain inference",
+        ),
+
+        (
+            r"\b(?:suggests?|indicates?|could\s+indicate|may\s+indicate)\b"
+            r"[^.]{0,180}\b(?:hosting|hosted|web\s+application|application\s+server|"
+            r"complex\s+infrastructure|security|risk|safe|secure)\b",
+            "infrastructure or security inference",
+        ),
+
+        (
+            r"\b(?:indicat(?:e|ing)|suggest(?:s|ing))\b"
+            r"[^.]{0,180}\b(?:security|secure|risk|safe|safety)\b",
+            "unsupported security inference",
+        ),
+
+        (
+            r"\b(?:hosting\s+web\s+applications?|web\s+applications?\s+are\s+hosted|"
+            r"application\s+hosting)\b",
+            "application-hosting inference",
+        ),
+
+        (
+            r"\b(?:more\s+complex|complex|sophisticated)\s+"
+            r"(?:infrastructure|architecture)\b",
+            "unsupported infrastructure-complexity inference",
+        ),
     ]
 
     for pattern, description in forbidden_patterns:
@@ -1453,54 +1597,188 @@ def validate_security_claims(report: str) -> List[str]:
 # AI INTERPRETATION VALIDATION (RELAXED)
 # ============================================================
 
-def validate_ai_interpretation(interpretation: str, deterministic: Dict[str, Any]) -> List[str]:
+def validate_ai_interpretation(
+    interpretation: str,
+    deterministic: Dict[str, Any],
+) -> List[str]:
     errors = validate_security_claims(interpretation)
+
     text = str(interpretation or "").strip()
     lower = text.lower()
     facts = deterministic["authoritative_facts"]
 
     if not text:
         errors.append("AI interpretation is empty.")
-        return errors
+        return list(dict.fromkeys(errors))
 
-    if re.search(r"(?m)^\s*#+\s+", text):
-        errors.append("AI interpretation contains a heading.")
+    required_labels = [
+        "DOMAIN_INFRASTRUCTURE:",
+        "NETWORK_RELATIONSHIPS:",
+        "ORGANIZATIONAL_ASSOCIATIONS:",
+        "CERTIFICATE_OBSERVATIONS:",
+        "INFRASTRUCTURE_PATTERNS:",
+    ]
 
-    if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+\.\s+)", text):
-        errors.append("AI interpretation contains a list item.")
+    # ------------------------------------------------------------
+    # Required structured sections
+    # ------------------------------------------------------------
 
-    # ---- open TCP count ----
-    open_ports = safe_int(facts["total_open_ports"])
-    if open_ports > 0:
-        port_ok = (
-            re.search(rf"\b{open_ports}\s+open\s+tcp\s+ports?\b", lower)
-            or re.search(rf"\b{open_ports}\s+open\s+tcp\s+observations?\b", lower)
-            or re.search(rf"\b{open_ports}\s+open\s+ports?\b", lower)
-            or re.search(rf"\b{open_ports}\s+tcp\s+ports?\b", lower)
-        )
-        if not port_ok:
+    for label in required_labels:
+        if label.lower() not in lower:
+            errors.append(f"AI interpretation is missing {label}")
+
+    if errors:
+        return list(dict.fromkeys(errors))
+
+    # ------------------------------------------------------------
+    # Extract each AI section
+    # ------------------------------------------------------------
+
+    section_pattern = re.compile(
+        r"(?is)"
+        r"(DOMAIN_INFRASTRUCTURE|"
+        r"NETWORK_RELATIONSHIPS|"
+        r"ORGANIZATIONAL_ASSOCIATIONS|"
+        r"CERTIFICATE_OBSERVATIONS|"
+        r"INFRASTRUCTURE_PATTERNS)"
+        r"\s*:\s*"
+        r"(.*?)"
+        r"(?=\n\s*(?:DOMAIN_INFRASTRUCTURE|"
+        r"NETWORK_RELATIONSHIPS|"
+        r"ORGANIZATIONAL_ASSOCIATIONS|"
+        r"CERTIFICATE_OBSERVATIONS|"
+        r"INFRASTRUCTURE_PATTERNS)\s*:|\Z)",
+    )
+
+    sections = {
+        match.group(1).upper(): match.group(2).strip()
+        for match in section_pattern.finditer(text)
+    }
+
+    for label in required_labels:
+        key = label.rstrip(":")
+        if not sections.get(key):
+            errors.append(f"AI section {label} is empty.")
+
+    if errors:
+        return list(dict.fromkeys(errors))
+
+    # ------------------------------------------------------------
+    # Reject accidental Markdown headings/lists
+    # ------------------------------------------------------------
+
+    for section_text in sections.values():
+        if re.search(r"(?m)^\s*#+\s+", section_text):
+            errors.append("AI interpretation contains a Markdown heading.")
+
+        if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+\.\s+)", section_text):
+            errors.append("AI interpretation contains a list item.")
+
+    # ------------------------------------------------------------
+    # Authoritative counts
+    # ------------------------------------------------------------
+
+    subdomain_count = safe_int(facts["subdomain_count"])
+    ip_count = safe_int(facts["ip_count"])
+    ipv4_count = safe_int(facts["ipv4_count"])
+    ipv6_count = safe_int(facts["ipv6_count"])
+    certificate_count = safe_int(facts["certificate_count"])
+    open_port_count = safe_int(facts["total_open_ports"])
+    banner_count = safe_int(facts["ports_with_banners"])
+    scanned_ip_count = safe_int(facts["scanned_ip_count"])
+    organization_count = safe_int(facts["organization_count"])
+    asn_count = safe_int(facts["asn_count"])
+
+    vt = facts["virustotal"]
+
+    # ------------------------------------------------------------
+    # Narrow category-specific numeric validation
+    #
+    # Do NOT use a broad "N + arbitrary noun phrase" regex.
+    # ------------------------------------------------------------
+
+    numeric_patterns = [
+        (
+            r"\b(\d+)\s+(?:observed\s+)?subdomains?\b",
+            subdomain_count,
+            "subdomains",
+        ),
+        (
+            r"\b(\d+)\s+(?:observed\s+)?ip\s+addresses?\b",
+            ip_count,
+            "IP addresses",
+        ),
+        (
+            r"\b(\d+)\s+ipv4(?:\s+addresses?)?\b",
+            ipv4_count,
+            "IPv4 addresses",
+        ),
+        (
+            r"\b(\d+)\s+ipv6(?:\s+addresses?)?\b",
+            ipv6_count,
+            "IPv6 addresses",
+        ),
+        (
+            r"\b(\d+)\s+(?:observed\s+)?certificates?\b",
+            certificate_count,
+            "certificates",
+        ),
+        (
+            r"\b(\d+)\s+(?:open\s+tcp\s+)?(?:observations?|ports?)\b",
+            open_port_count,
+            "open TCP observations/ports",
+        ),
+        (
+            r"\b(\d+)\s+(?:service\s+)?banners?\b",
+            banner_count,
+            "service banners",
+        ),
+        (
+            r"\b(\d+)\s+scanned\s+ip\s+addresses?\b",
+            scanned_ip_count,
+            "scanned IP addresses",
+        ),
+        (
+            r"\b(\d+)\s+organization\s+associations?\b",
+            organization_count,
+            "organization associations",
+        ),
+        (
+            r"\b(\d+)\s+asn\s+associations?\b",
+            asn_count,
+            "ASN associations",
+        ),
+    ]
+
+    for pattern, expected, label in numeric_patterns:
+        for match in re.finditer(pattern, lower):
+            reported = safe_int(match.group(1), expected)
+
+            if reported != expected:
+                errors.append(
+                    f"AI interpretation reports {reported} {label}; "
+                    f"authoritative value is {expected}."
+                )
+
+    # ------------------------------------------------------------
+    # Open TCP observations must be represented when present
+    # ------------------------------------------------------------
+
+    if open_port_count > 0:
+        if not re.search(
+            rf"\b{open_port_count}\s+"
+            r"(?:open\s+tcp\s+(?:ports?|observations?)|"
+            r"open\s+ports?)\b",
+            lower,
+        ):
             errors.append(
-                f"AI interpretation does not state the authoritative open "
-                f"TCP count of {open_ports}."
+                f"AI interpretation does not state the authoritative "
+                f"open TCP observation count of {open_port_count}."
             )
 
-        contradictory_patterns = [
-            r"\ba\s+total\s+of\s+(\d+)\s+open\s+tcp\s+ports?\b",
-            r"\boverall\s+(\d+)\s+open\s+tcp\s+ports?\b",
-            r"\bin\s+total,?\s+(\d+)\s+open\s+tcp\s+ports?\b",
-        ]
-        for pattern in contradictory_patterns:
-            match = re.search(pattern, lower)
-            if match and safe_int(match.group(1), open_ports) != open_ports:
-                errors.append(
-                    "AI interpretation contains an overall open TCP count "
-                    "that conflicts with the authoritative count."
-                )
-                break
-
-    # ---- banner count / coverage ----
-    banner_count = safe_int(facts["ports_with_banners"])
-    coverage = safe_float(facts["banner_coverage_percentage"])
+    # ------------------------------------------------------------
+    # Banner consistency
+    # ------------------------------------------------------------
 
     if banner_count > 0:
         if re.search(
@@ -1508,21 +1786,10 @@ def validate_ai_interpretation(interpretation: str, deterministic: Dict[str, Any
             lower,
         ):
             errors.append(
-                "AI interpretation incorrectly states that no banners were observed."
+                "AI interpretation incorrectly states that no banners "
+                "were observed."
             )
 
-        has_banner_fact = (
-            re.search(rf"\b{banner_count}\b", lower)
-            or re.search(rf"\b{coverage:.2f}%\b", lower)
-            or re.search(rf"\b{coverage:.1f}%\b", lower)
-            or (re.search(r"\b100(?:\.0+)?%\b", lower) and coverage == 100.0)
-            or re.search(r"\bbanners?\b", lower)
-        )
-        if not has_banner_fact:
-            errors.append(
-                "AI interpretation does not preserve the banner "
-                "observation facts."
-            )
     elif banner_count == 0:
         if re.search(
             r"\b(?:all|\d+)\s+(?:open\s+)?(?:tcp\s+)?ports?\s+"
@@ -1530,178 +1797,142 @@ def validate_ai_interpretation(interpretation: str, deterministic: Dict[str, Any
             lower,
         ):
             errors.append(
-                "AI interpretation claims banners were observed on all "
-                "ports even though none were recorded."
+                "AI interpretation claims banners were observed even "
+                "though none were recorded."
             )
 
-    # ---- broad inferential language ----
-    broad_inference_patterns = [
-        (r"\b(?:may|might|could|can)\s+(?:indicate|suggest|imply)\b",
-         "unsupported speculative inference"),
-        (r"\b(?:indicates?|suggests?|implies?)\b[^.]{0,160}\b"
-         r"(?:risk|security|hosting|application|complexity|purpose|ownership)\b",
-         "inference"),
+    # ------------------------------------------------------------
+    # Banner coverage consistency
+    # ------------------------------------------------------------
+
+    coverage = safe_float(facts["banner_coverage_percentage"])
+
+    coverage_values = [
+        safe_float(value)
+        for value in re.findall(
+            r"\b(\d+(?:\.\d+)?)%\s+(?:banner\s+)?coverage\b",
+            lower,
+        )
     ]
+
+    for reported in coverage_values:
+        if abs(reported - coverage) > 0.01:
+            errors.append(
+                f"AI interpretation reports banner coverage of "
+                f"{reported:.2f}%, but the authoritative value is "
+                f"{coverage:.2f}%."
+            )
+
+    # ------------------------------------------------------------
+    # VirusTotal consistency
+    # ------------------------------------------------------------
+
+    if vt.get("available"):
+        malicious = safe_int(vt.get("malicious"))
+        suspicious = safe_int(vt.get("suspicious"))
+        total_vendors = safe_int(vt.get("total_vendors"))
+        risk_score = safe_int(vt.get("risk_score"))
+
+        malicious_claims = re.findall(
+            r"\b(\d+)\s+malicious\b",
+            lower,
+        )
+
+        suspicious_claims = re.findall(
+            r"\b(\d+)\s+suspicious\b",
+            lower,
+        )
+
+        vendor_claims = re.findall(
+            r"\b(\d+)\s+vendor\s+results?\b",
+            lower,
+        )
+
+        score_claims = re.findall(
+            r"(?:risk\s+score|score)"
+            r"\s*(?:of|is|:)?\s*(\d{1,3})\s*/\s*100",
+            lower,
+        )
+
+        for value in malicious_claims:
+            if safe_int(value) != malicious:
+                errors.append(
+                    f"AI interpretation reports {value} malicious "
+                    f"results; authoritative value is {malicious}."
+                )
+
+        for value in suspicious_claims:
+            if safe_int(value) != suspicious:
+                errors.append(
+                    f"AI interpretation reports {value} suspicious "
+                    f"results; authoritative value is {suspicious}."
+                )
+
+        for value in vendor_claims:
+            if safe_int(value) != total_vendors:
+                errors.append(
+                    f"AI interpretation reports {value} vendor results; "
+                    f"authoritative value is {total_vendors}."
+                )
+
+        for value in score_claims:
+            if safe_int(value) != risk_score:
+                errors.append(
+                    f"AI interpretation reports VirusTotal score "
+                    f"{value}/100; authoritative value is "
+                    f"{risk_score}/100."
+                )
+
+    # ------------------------------------------------------------
+    # Do not associate open TCP counts with IP versions
+    # ------------------------------------------------------------
+
+    if re.search(
+        r"\bopen\s+tcp\s+(?:ports?|observations?)\b"
+        r"[^.]{0,120}\bipv[46]\b",
+        lower,
+    ):
+        errors.append(
+            "AI interpretation incorrectly associates open TCP "
+            "observations with IP versions."
+        )
+
+    # ------------------------------------------------------------
+    # Reject unsupported inferential language
+    # ------------------------------------------------------------
+
+    broad_inference_patterns = [
+        (
+            r"\b(?:may|might|could)\s+"
+            r"(?:indicate|suggest|imply)\b",
+            "unsupported speculative inference",
+        ),
+        (
+            r"\b(?:indicates?|suggests?|implies?)\b[^.]{0,160}"
+            r"\b(?:risk|security|hosting|application|complexity|"
+            r"purpose|ownership)\b",
+            "unsupported inference",
+        ),
+    ]
+
     for pattern, description in broad_inference_patterns:
         if re.search(pattern, lower):
             errors.append(f"Unsupported {description}.")
 
-    # ========================================================
-    # HALLUCINATED-NUMBER DETECTION
-    # ========================================================
-    # The LLM paragraph may only cite numbers that match the
-    # authoritative facts. Any "N <category>" phrase where the
-    # category maps to a known count and N is wrong is rejected.
-    # ========================================================
+    # ------------------------------------------------------------
+    # AI must not generate Key Takeaways or analytical limitation
+    # ------------------------------------------------------------
 
-    authoritative_counts = {
-        # ports
-        "open tcp port": safe_int(facts["total_open_ports"]),
-        "open tcp ports": safe_int(facts["total_open_ports"]),
-        "open port": safe_int(facts["total_open_ports"]),
-        "open ports": safe_int(facts["total_open_ports"]),
-        "tcp port": safe_int(facts["total_open_ports"]),
-        "tcp ports": safe_int(facts["total_open_ports"]),
-        "open tcp observation": safe_int(facts["total_open_ports"]),
-        "open tcp observations": safe_int(facts["total_open_ports"]),
+    if "key takeaways" in lower:
+        errors.append("AI interpretation must not generate Key Takeaways.")
 
-        # banners
-        "banner": safe_int(facts["ports_with_banners"]),
-        "banners": safe_int(facts["ports_with_banners"]),
-        "service banner": safe_int(facts["ports_with_banners"]),
-        "service banners": safe_int(facts["ports_with_banners"]),
-        "observed banner": safe_int(facts["ports_with_banners"]),
-        "observed banners": safe_int(facts["ports_with_banners"]),
-
-        # subdomains / ips
-        "subdomain": safe_int(facts["subdomain_count"]),
-        "subdomains": safe_int(facts["subdomain_count"]),
-        "observed subdomain": safe_int(facts["subdomain_count"]),
-        "observed subdomains": safe_int(facts["subdomain_count"]),
-
-        "ip address": safe_int(facts["ip_count"]),
-        "ip addresses": safe_int(facts["ip_count"]),
-        "observed ip address": safe_int(facts["ip_count"]),
-        "observed ip addresses": safe_int(facts["ip_count"]),
-        "ip": safe_int(facts["ip_count"]),
-        "ips": safe_int(facts["ip_count"]),
-
-        "ipv4 address": safe_int(facts["ipv4_count"]),
-        "ipv4 addresses": safe_int(facts["ipv4_count"]),
-        "ipv6 address": safe_int(facts["ipv6_count"]),
-        "ipv6 addresses": safe_int(facts["ipv6_count"]),
-
-        "scanned ip": safe_int(facts["scanned_ip_count"]),
-        "scanned ips": safe_int(facts["scanned_ip_count"]),
-        "scanned ip address": safe_int(facts["scanned_ip_count"]),
-        "scanned ip addresses": safe_int(facts["scanned_ip_count"]),
-
-        # graph categories
-        "asn": safe_int(facts["asn_count"]),
-        "asns": safe_int(facts["asn_count"]),
-        "organization": safe_int(facts["organization_count"]),
-        "organizations": safe_int(facts["organization_count"]),
-        "certificate": safe_int(facts["certificate_count"]),
-        "certificates": safe_int(facts["certificate_count"]),
-    }
-
-    # Normalise a candidate category phrase: collapse whitespace,
-    # strip trailing connective noise.
-    def _normalize_category(text: str) -> str:
-        text = re.sub(r"\s+", " ", text.strip().lower())
-        for cut in (
-            " were", " was", " is", " are", " have", " has",
-            " observed", " identified", " recorded", " reported",
-            " being", " across",
-        ):
-            if text.endswith(cut):
-                text = text[: -len(cut)].strip()
-        return text
-
-    # Match "N <optional modifiers> <category>" where category is
-    # a short noun phrase. We look ahead up to ~6 words.
-    numeric_claim_re = re.compile(
-        r"\b(\d+)\s+"
-        r"(?:(?:different|separate|distinct|total|overall|individual)\s+)?"
-        r"([a-z][a-z0-9_\- ]{2,40}?)\b"
-    )
-
-    for match in numeric_claim_re.finditer(lower):
-        raw_number = match.group(1)
-        raw_category = _normalize_category(match.group(2))
-
-        # Try progressively shorter category suffixes to find a match.
-        tokens = raw_category.split()
-        candidates = [" ".join(tokens[i:]) for i in range(len(tokens))]
-
-        matched_category = None
-        for candidate in candidates:
-            if candidate in authoritative_counts:
-                matched_category = candidate
-                break
-
-        if matched_category is None:
-            continue
-
-        authoritative = authoritative_counts[matched_category]
-        reported = safe_int(raw_number, authoritative)
-
-        if reported != authoritative:
-            errors.append(
-                f"AI interpretation claims {reported} {matched_category} "
-                f"but the authoritative count is {authoritative}."
-            )
-
-    # --------------------------------------------------------
-    # Reject multiple banner coverage percentages / ranges.
-    # There is exactly one authoritative coverage value.
-    # --------------------------------------------------------
-    if re.search(
-        r"\b\d+\s+(?:different\s+|separate\s+|distinct\s+)?"
-        r"banner\s+coverage\s+percentages?\b",
-        lower,
-    ):
+    if "analytical limitation" in lower:
         errors.append(
-            "AI interpretation claims multiple banner coverage "
-            "percentages even though there is a single authoritative value."
+            "AI interpretation must not generate the analytical limitation."
         )
-
-    if re.search(
-        r"\branging\s+from\s+\d+(?:\.\d+)?%\s+to\s+\d+(?:\.\d+)?%",
-        lower,
-    ):
-        errors.append(
-            "AI interpretation describes a range of percentages that "
-            "does not correspond to any authoritative metric."
-        )
-
-    # --------------------------------------------------------
-    # Reject "open TCP ports ... IPv4/IPv6" misassociation.
-    # --------------------------------------------------------
-    if re.search(r"\bopen\s+tcp\s+ports?\b[^.]{0,120}\bipv[46]\b", lower):
-        errors.append(
-            "AI interpretation incorrectly associates open TCP ports "
-            "with IP versions."
-        )
-
-    # --------------------------------------------------------
-    # Reject "N of them being X and M being Y" style claims
-    # where the numbers don't add up to the parent category.
-    # --------------------------------------------------------
-    # e.g. "4 open TCP ports, with 2 of them being IPv4 and 2 IPv6"
-    #      -> "of them being" splits are fine ONLY when the parent
-    #         category is an IP-version split. Otherwise reject.
-    for match in re.finditer(
-        r"\b(\d+)\s+open\s+tcp\s+ports?\b[^.]{0,120}"
-        r"\bwith\s+(\d+)\s+of\s+them\s+being\b",
-        lower,
-    ):
-        errors.append(
-            "AI interpretation misattributes IP-version counts to open TCP ports."
-        )
-        break
 
     return list(dict.fromkeys(errors))
+
 # ============================================================
 # SAFE AI FALLBACK
 # ============================================================
@@ -1816,213 +2047,276 @@ def validate_report(report: str, deterministic: Dict[str, Any]) -> List[str]:
 
 def build_deterministic_fallback(deterministic: Dict[str, Any]) -> str:
     facts = deterministic["authoritative_facts"]
+
     domain = facts["domain"]
-    subdomains = facts["subdomains"]
-    ip_addresses = facts["ip_addresses"]
-    asns = facts["asns"]
-    organizations = facts["organizations"]
-    certificates = facts["certificates"]
-    port_observations = facts["port_observations"]
+    subdomain_count = safe_int(facts["subdomain_count"])
+    ip_count = safe_int(facts["ip_count"])
+    asn_count = safe_int(facts["asn_count"])
+    organization_count = safe_int(facts["organization_count"])
+    certificate_count = safe_int(facts["certificate_count"])
 
     open_port_count = safe_int(facts["total_open_ports"])
     banner_count = safe_int(facts["ports_with_banners"])
     banner_coverage = safe_float(facts["banner_coverage_percentage"])
+
     ipv4_count = safe_int(facts["ipv4_count"])
     ipv6_count = safe_int(facts["ipv6_count"])
     unknown_ip_count = safe_int(facts["unknown_ip_count"])
+
     scanned_ip_count = safe_int(facts["scanned_ip_count"])
     ips_with_open_ports = safe_int(facts["ips_with_open_ports"])
+
+    asns = facts["asns"]
+    organizations = facts["organizations"]
+    port_observations = facts["port_observations"]
     vt = facts["virustotal"]
 
-    # ---- Domain Infrastructure ----
-    domain_lines: List[str] = [
+    # ------------------------------------------------------------
+    # Domain Infrastructure
+    # ------------------------------------------------------------
+
+    domain_lines = [
         "## Domain Infrastructure",
         "",
         f"Target domain: {domain}",
         "",
-        f"Subdomains observed: {len(subdomains)}",
+        (
+            f"DomainAtlas identified {subdomain_count} "
+            f"{plural(subdomain_count, 'subdomain', 'subdomains')} "
+            f"associated with {domain}."
+        ),
+        (
+            f"The collected infrastructure contains {ip_count} "
+            f"{plural(ip_count, 'IP address', 'IP addresses')}, "
+            f"including {ipv4_count} IPv4, {ipv6_count} IPv6, and "
+            f"{unknown_ip_count} with an unknown IP version."
+        ),
+        (
+            f"The discovered namespace and infrastructure inventory remain "
+            f"available in the underlying DomainAtlas data."
+        ),
     ]
-    if subdomains:
-        domain_lines.append("Observed subdomains:")
-        for subdomain in subdomains:
-            domain_lines.append(f"- {subdomain}")
-    else:
-        domain_lines.append("- No observed subdomains were identified.")
 
-    domain_lines.extend(["", f"IP addresses observed: {len(ip_addresses)}"])
-    if ip_addresses:
-        domain_lines.append("Observed IP addresses:")
-        for ip in ip_addresses:
-            domain_lines.append(f"- {ip}")
-    else:
-        domain_lines.append("- No observed IP addresses were identified.")
-
-    domain_lines.extend([
-        "",
-        "IP version summary:",
-        f"- IPv4: {ipv4_count}",
-        f"- IPv6: {ipv6_count}",
-        f"- Unknown: {unknown_ip_count}",
-    ])
     domain_infrastructure = "\n".join(domain_lines)
 
-    # ---- Network Relationships ----
-    network_lines: List[str] = ["## Network Relationships", ""]
-    if asns:
-        network_lines.append(f"ASN associations: {len(asns)}")
-        for asn in asns:
-            network_lines.append(f"- {asn}")
-    else:
-        network_lines.append("ASN associations: None observed")
+    # ------------------------------------------------------------
+    # Network Relationships
+    # ------------------------------------------------------------
 
-    network_lines.extend([
+    network_lines = [
+        "## Network Relationships",
         "",
-        f"Scanned IP addresses: {scanned_ip_count}",
-        f"IPs with open TCP ports: {ips_with_open_ports}",
-        f"Open TCP observations: {open_port_count}",
-    ])
+        (
+            f"The collected graph contains {asn_count} "
+            f"{plural(asn_count, 'ASN association', 'ASN associations')} "
+            f"and {scanned_ip_count} scanned "
+            f"{plural(scanned_ip_count, 'IP address', 'IP addresses')}."
+        ),
+        (
+            f"{ips_with_open_ports} "
+            f"{plural(ips_with_open_ports, 'IP address', 'IP addresses')} "
+            f"had observed open TCP ports, producing {open_port_count} "
+            f"open TCP observations."
+        ),
+        (
+            f"Service banners were observed for {banner_count} of those "
+            f"observations, representing {banner_coverage:.2f}% banner coverage."
+        ),
+    ]
+
     if port_observations:
-        network_lines.extend(["", "Observed TCP services:"])
-        network_lines.extend(format_port_observations(port_observations))
-    else:
-        network_lines.extend([
-            "",
-            "Observed TCP services:",
-            "- No open TCP services were observed.",
-        ])
+        observed_services = []
+        seen_services = set()
+
+        for observation in port_observations:
+            service = clean_text(
+                observation.get("service"),
+                "Unknown service",
+            )
+
+            key = service.lower()
+
+            if key in seen_services:
+                continue
+
+            seen_services.add(key)
+            observed_services.append(service)
+
+        if observed_services:
+            network_lines.append(
+                "Observed service labels include "
+                + ", ".join(observed_services)
+                + "."
+            )
+
     network_relationships = "\n".join(network_lines)
 
-    # ---- Organizational Associations ----
-    organization_lines: List[str] = [
+    # ------------------------------------------------------------
+    # Organizational Associations
+    # ------------------------------------------------------------
+
+    if organizations:
+        organization_text = ", ".join(
+            str(value) for value in organizations
+        )
+        organization_sentence = (
+            f"The collected infrastructure contains "
+            f"{organization_count} "
+            f"{plural(organization_count, 'organization association', 'organization associations')}: "
+            f"{organization_text}."
+        )
+    else:
+        organization_sentence = (
+            "No organization associations were observed in the collected data."
+        )
+
+    organizational_associations = "\n".join([
         "## Organizational Associations",
         "",
-        f"Organizations observed: {len(organizations)}",
-    ]
-    if organizations:
-        for organization in organizations:
-            organization_lines.append(f"- {organization}")
-    else:
-        organization_lines.append("- No organization associations were observed.")
-    organizational_associations = "\n".join(organization_lines)
-
-    # ---- Certificate Observations ----
-    certificate_lines: List[str] = [
-        "## Certificate Observations",
-        "",
-        f"Certificate observations: {len(certificates)}",
-    ]
-    if certificates:
-        certificate_lines.append("Observed certificate identifiers:")
-        for certificate in certificates:
-            certificate_lines.append(f"- {certificate}")
-    else:
-        certificate_lines.append("- No certificate observations were identified.")
-    certificate_observations = "\n".join(certificate_lines)
-
-    # ---- Infrastructure Patterns ----
-    pattern_lines: List[str] = ["## Infrastructure Patterns", ""]
-    if len(ip_addresses) == 1:
-        pattern_lines.append("The collected infrastructure includes 1 observed IP address.")
-    elif len(ip_addresses) > 1:
-        pattern_lines.append(
-            f"The collected infrastructure includes {len(ip_addresses)} observed IP addresses."
-        )
-    else:
-        pattern_lines.append("No observed IP addresses were identified.")
-
-    pattern_lines.extend([
-        "",
-        "TCP exposure:",
-        f"- Open TCP observations: {open_port_count}",
-        f"- Service banners observed: {banner_count}",
-        f"- Banner coverage: {banner_coverage:.2f}%",
+        organization_sentence,
+        (
+            "These associations are reported from the collected "
+            "IP/ASN intelligence and do not independently establish "
+            "domain ownership."
+        ),
     ])
 
-    no_banner_observations: List[str] = []
+    # ------------------------------------------------------------
+    # Certificate Observations
+    # ------------------------------------------------------------
+
+    certificate_observations = "\n".join([
+        "## Certificate Observations",
+        "",
+        (
+            f"DomainAtlas identified {certificate_count} "
+            f"{plural(certificate_count, 'certificate observation', 'certificate observations')} "
+            f"during collection."
+        ),
+        (
+            "The certificate inventory is retained in the underlying "
+            "DomainAtlas data; certificate identifiers are not repeated "
+            "individually in the primary intelligence assessment."
+        ),
+        (
+            "Certificate presence alone does not establish current validity, "
+            "ownership, or security posture."
+        ),
+    ])
+
+    # ------------------------------------------------------------
+    # Infrastructure Patterns
+    # ------------------------------------------------------------
+
+    pattern_lines = [
+        "## Infrastructure Patterns",
+        "",
+        (
+            f"The collected infrastructure includes {ip_count} "
+            f"{plural(ip_count, 'IP address', 'IP addresses')} and "
+            f"{open_port_count} open TCP observations."
+        ),
+        (
+            f"Banner data was available for {banner_count} observations, "
+            f"representing {banner_coverage:.2f}% coverage of the "
+            f"represented open TCP observations."
+        ),
+    ]
+
+    # Keep concrete observed service/banner information available without
+    # turning the main report into an inventory dump.
+    banner_services = []
+    seen_banner_services = set()
+
     for observation in port_observations:
         banner = normalize_banner_text(observation.get("banner"))
-        if not banner:
-            ip = clean_text(observation.get("ip"), "Unknown IP")
-            port = normalize_port(observation.get("port"))
-            if port is not None:
-                no_banner_observations.append(f"{ip}:{port}/tcp")
+        service = clean_text(
+            observation.get("service"),
+            "Unknown service",
+        )
 
-    if no_banner_observations:
-        pattern_lines.extend(["", "Open TCP observations without banners:"])
-        for item in no_banner_observations:
-            pattern_lines.append(f"- {item}")
+        if not banner:
+            continue
+
+        key = service.lower()
+
+        if key in seen_banner_services:
+            continue
+
+        seen_banner_services.add(key)
+        banner_services.append(service)
+
+    if banner_services:
+        pattern_lines.append(
+            "Banner-bearing observations include the following observed "
+            "service labels: "
+            + ", ".join(banner_services)
+            + "."
+        )
 
     if vt["available"]:
-        pattern_lines.extend([
-            "",
-            "VirusTotal observations:",
-            f"- Risk score: {vt['risk_score']}/100",
-            f"- Malicious detections: {vt['malicious']}",
-            f"- Suspicious detections: {vt['suspicious']}",
-            f"- Harmless results: {vt['harmless']}",
-            f"- Undetected results: {vt['undetected']}",
-            f"- Timeout results: {vt['timeout']}",
-            f"- Total vendors: {vt['total_vendors']}",
-        ])
-        registrar = clean_text(vt.get("registrar"), "")
-        if registrar:
-            pattern_lines.append(f"- Registrar: {registrar}")
+        pattern_lines.append(
+            f"VirusTotal reported {vt['malicious']} malicious and "
+            f"{vt['suspicious']} suspicious results among "
+            f"{vt['total_vendors']} vendor results."
+        )
     else:
-        pattern_lines.extend([
-            "",
-            "VirusTotal observations:",
-            "- VirusTotal intelligence was not available.",
-        ])
+        pattern_lines.append(
+            "VirusTotal intelligence was not available in the collected analysis."
+        )
+
     infrastructure_patterns = "\n".join(pattern_lines)
 
-    # ---- Key Takeaways ----
-    if len(subdomains) == 0:
+    # ------------------------------------------------------------
+    # Key Takeaways
+    # ------------------------------------------------------------
+
+    if subdomain_count > 0:
         takeaway_1 = (
-            f"No observed subdomains were identified; "
-            f"{len(ip_addresses)} "
-            f"{plural(len(ip_addresses), 'IP address', 'IP addresses')} "
-            f"{be_verb(len(ip_addresses))} observed."
-        )
-    elif len(subdomains) == 1:
-        takeaway_1 = (
-            f"1 observed subdomain and {len(ip_addresses)} "
-            f"{plural(len(ip_addresses), 'IP address', 'IP addresses')} were identified."
+            f"{subdomain_count} "
+            f"{plural(subdomain_count, 'subdomain', 'subdomains')} "
+            f"were identified across the collected namespace, with "
+            f"recurring naming patterns retained in the DomainAtlas "
+            f"analysis data."
         )
     else:
         takeaway_1 = (
-            f"{len(subdomains)} observed subdomains and {len(ip_addresses)} "
-            f"{plural(len(ip_addresses), 'IP address', 'IP addresses')} were identified."
+            "No observed subdomains were identified in the collected data."
         )
 
     if open_port_count > 0:
         takeaway_2 = (
-            f"TCP scanning identified {open_port_count} open TCP "
-            f"{plural(open_port_count, 'port', 'ports')}; {banner_count} "
-            f"{plural(banner_count, 'service banner', 'service banners')} "
-            f"were observed, representing {banner_coverage:.2f}% banner coverage."
+            f"{ip_count} "
+            f"{plural(ip_count, 'IP address', 'IP addresses')} were observed, "
+            f"with {open_port_count} open TCP observations across "
+            f"{scanned_ip_count} scanned "
+            f"{plural(scanned_ip_count, 'IP address', 'IP addresses')}."
         )
     else:
-        takeaway_2 = "No open TCP ports were observed."
+        takeaway_2 = (
+            f"{ip_count} "
+            f"{plural(ip_count, 'IP address', 'IP addresses')} were observed, "
+            "with no open TCP observations recorded."
+        )
 
     if vt["available"]:
         takeaway_3 = (
-            f"VirusTotal recorded {vt['malicious']} malicious and "
+            f"VirusTotal reported {vt['malicious']} malicious and "
             f"{vt['suspicious']} suspicious results among "
-            f"{vt['total_vendors']} vendor results, with a reported score of "
-            f"{vt['risk_score']}/100."
+            f"{vt['total_vendors']} vendor results."
         )
     else:
         takeaway_3 = (
-            "VirusTotal intelligence was not available in the collected "
-            "DomainAtlas analysis."
+            "VirusTotal intelligence was not available in the collected analysis."
         )
 
-    key_takeaways = (
-        "## Key Takeaways\n\n"
-        f"1. {takeaway_1}\n"
-        f"2. {takeaway_2}\n"
-        f"3. {takeaway_3}"
-    )
+    key_takeaways = "\n".join([
+        "## Key Takeaways",
+        "",
+        f"1. {takeaway_1}",
+        f"2. {takeaway_2}",
+        f"3. {takeaway_3}",
+    ])
 
     return "\n\n".join([
         domain_infrastructure,
@@ -2033,7 +2327,6 @@ def build_deterministic_fallback(deterministic: Dict[str, Any]) -> str:
         key_takeaways,
     ])
 
-
 # ============================================================
 # AI PARAGRAPH INSERTION
 # ============================================================
@@ -2041,30 +2334,79 @@ def build_deterministic_fallback(deterministic: Dict[str, Any]) -> str:
 AI_INTERPRETATION_MARKER = "## Infrastructure Patterns"
 
 
-def insert_ai_interpretation(report: str, ai_interpretation: str) -> str:
+def insert_ai_interpretation(
+    report: str,
+    ai_interpretation: str,
+) -> str:
     if not ai_interpretation:
         return report
 
-    block = (
-        AI_INTERPRETATION_MARKER
-        + "\n\n"
-        + "AI-Assisted Interpretation: "
-        + ai_interpretation.strip()
-        + "\n\n"
+    text = str(ai_interpretation).strip()
+
+    section_pattern = re.compile(
+        r"(?is)"
+        r"(DOMAIN_INFRASTRUCTURE|"
+        r"NETWORK_RELATIONSHIPS|"
+        r"ORGANIZATIONAL_ASSOCIATIONS|"
+        r"CERTIFICATE_OBSERVATIONS|"
+        r"INFRASTRUCTURE_PATTERNS)"
+        r"\s*:\s*"
+        r"(.*?)"
+        r"(?=\n\s*(?:DOMAIN_INFRASTRUCTURE|"
+        r"NETWORK_RELATIONSHIPS|"
+        r"ORGANIZATIONAL_ASSOCIATIONS|"
+        r"CERTIFICATE_OBSERVATIONS|"
+        r"INFRASTRUCTURE_PATTERNS)\s*:|\Z)",
     )
 
-    pattern = (
-        re.escape(AI_INTERPRETATION_MARKER)
-        + r"\s*\n\s*AI-Assisted Interpretation:.*?(?=\n\n|\n##|\n###|\Z)"
-    )
-    if re.search(pattern, report, re.DOTALL):
-        return re.sub(pattern, block.rstrip(), report, count=1, flags=re.DOTALL)
+    generated_sections = {
+        match.group(1).upper(): match.group(2).strip()
+        for match in section_pattern.finditer(text)
+    }
 
-    if AI_INTERPRETATION_MARKER in report:
-        return report.replace(AI_INTERPRETATION_MARKER, block.rstrip(), 1)
+    section_mapping = {
+        "DOMAIN_INFRASTRUCTURE": "Domain Infrastructure",
+        "NETWORK_RELATIONSHIPS": "Network Relationships",
+        "ORGANIZATIONAL_ASSOCIATIONS": "Organizational Associations",
+        "CERTIFICATE_OBSERVATIONS": "Certificate Observations",
+        "INFRASTRUCTURE_PATTERNS": "Infrastructure Patterns",
+    }
 
-    return report
+    result = report
 
+    for generated_key, report_heading in section_mapping.items():
+        generated_text = generated_sections.get(generated_key)
+
+        if not generated_text:
+            continue
+
+        pattern = re.compile(
+            rf"(?is)"
+            rf"(^##\s+{re.escape(report_heading)}\s*$)"
+            rf"(.*?)"
+            rf"(?=^##\s+|\Z)",
+            re.MULTILINE,
+        )
+
+        match = pattern.search(result)
+
+        if not match:
+            continue
+
+        replacement = (
+            match.group(1)
+            + "\n\n"
+            + generated_text.strip()
+            + "\n"
+        )
+
+        result = (
+            result[:match.start()]
+            + replacement
+            + result[match.end():]
+        )
+
+    return result.strip()
 
 # ============================================================
 # MAIN GENERATION FUNCTION
