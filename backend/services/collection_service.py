@@ -1,5 +1,6 @@
 import json
 import subprocess
+import dns.resolver
 from pathlib import Path
 
 from backend.validation.domain_validator import validate_domain
@@ -1064,122 +1065,139 @@ def collect_domain_osint(
 
 
     # ========================================================
-    # 8. COMBINE SUBDOMAINS
+    # 8. COMBINE AND VERIFY SUBDOMAINS
     # ========================================================
 
     subdomain_sources = {}
-
 
     # --------------------------------------------------------
     # Subfinder results
     # --------------------------------------------------------
 
-    for subdomain in (
-        subfinder_subdomains
-    ):
-
-        if not isinstance(
-            subdomain,
-            str
-        ):
+    for subdomain in subfinder_subdomains:
+        if not isinstance(subdomain, str):
             continue
 
-
-        subdomain = (
-            subdomain.strip()
-        )
-
+        subdomain = subdomain.strip().lower().rstrip(".")
 
         if not subdomain:
             continue
 
-
         if subdomain not in subdomain_sources:
+            subdomain_sources[subdomain] = []
 
-            subdomain_sources[
-                subdomain
-            ] = []
-
-
-        if (
-            "Subfinder"
-            not in
-            subdomain_sources[
-                subdomain
-            ]
-        ):
-
-            subdomain_sources[
-                subdomain
-            ].append(
-                "Subfinder"
-            )
+        if "Subfinder" not in subdomain_sources[subdomain]:
+            subdomain_sources[subdomain].append("Subfinder")
 
 
     # --------------------------------------------------------
     # Amass results
     # --------------------------------------------------------
 
-    for subdomain in (
-        amass_subdomains
-    ):
-
-        if not isinstance(
-            subdomain,
-            str
-        ):
+    for subdomain in amass_subdomains:
+        if not isinstance(subdomain, str):
             continue
 
-
-        subdomain = (
-            subdomain.strip()
-        )
-
+        subdomain = subdomain.strip().lower().rstrip(".")
 
         if not subdomain:
             continue
 
-
         if subdomain not in subdomain_sources:
+            subdomain_sources[subdomain] = []
 
-            subdomain_sources[
-                subdomain
-            ] = []
-
-
-        if (
-            "Amass"
-            not in
-            subdomain_sources[
-                subdomain
-            ]
-        ):
-
-            subdomain_sources[
-                subdomain
-            ].append(
-                "Amass"
-            )
+        if "Amass" not in subdomain_sources[subdomain]:
+            subdomain_sources[subdomain].append("Amass")
 
 
     # --------------------------------------------------------
-    # Final merged subdomains
+    # Verify subdomain activity
+    #
+    # A subdomain is considered ACTIVE when it successfully
+    # resolves to at least one IPv4 or IPv6 address.
+    # --------------------------------------------------------
+
+    print(
+        f"[+] Verifying {len(subdomain_sources)} "
+        f"discovered subdomains..."
+    )
+
+    active_subdomains = []
+    inactive_subdomains = []
+
+    for subdomain in subdomain_sources:
+
+        if check_cancelled():
+            return {
+                "success": False,
+                "message": "Scan cancelled"
+            }
+
+        is_active = False
+
+        # Check IPv4 resolution
+        try:
+            answers = dns.resolver.resolve(
+                subdomain,
+                "A",
+                lifetime=2
+            )
+
+            if answers:
+                is_active = True
+
+        except (
+            dns.resolver.NoAnswer,
+            dns.resolver.NXDOMAIN,
+            dns.resolver.NoNameservers,
+            dns.exception.Timeout,
+        ):
+            pass
+
+        # Check IPv6 resolution if IPv4 did not resolve
+        if not is_active:
+            try:
+                answers = dns.resolver.resolve(
+                    subdomain,
+                    "AAAA",
+                    lifetime=2
+                )
+
+                if answers:
+                    is_active = True
+
+            except (
+                dns.resolver.NoAnswer,
+                dns.resolver.NXDOMAIN,
+                dns.resolver.NoNameservers,
+                dns.exception.Timeout,
+            ):
+                pass
+
+        # ----------------------------------------------------
+        # Store activity information
+        # ----------------------------------------------------
+
+        if is_active:
+            active_subdomains.append(subdomain)
+        else:
+            inactive_subdomains.append(subdomain)
+
+
+    # --------------------------------------------------------
+    # Build final subdomain records
+    #
+    # Keep ALL discovered subdomains in the inventory.
+    # Add an explicit "active" property for graph selection.
     # --------------------------------------------------------
 
     results["subdomains"] = [
-
         {
-            "subdomain":
-                subdomain,
-
-            "sources":
-                sources
+            "subdomain": subdomain,
+            "sources": subdomain_sources[subdomain],
+            "active": subdomain in active_subdomains
         }
-
-        for subdomain, sources
-        in sorted(
-            subdomain_sources.items()
-        )
+        for subdomain in sorted(subdomain_sources)
     ]
 
 
@@ -1188,29 +1206,47 @@ def collect_domain_osint(
     # --------------------------------------------------------
 
     common_subdomains = [
-
         subdomain
-
-        for subdomain, sources
-        in subdomain_sources.items()
-
+        for subdomain, sources in subdomain_sources.items()
         if len(sources) > 1
     ]
 
+
+    # --------------------------------------------------------
+    # Activity summary
+    # --------------------------------------------------------
 
     print(
         f"[+] Unique subdomains found: "
         f"{len(results['subdomains'])}"
     )
 
+    print(
+        f"[+] Active subdomains: "
+        f"{len(active_subdomains)}"
+    )
+
+    print(
+        f"[+] Inactive/unresolved subdomains: "
+        f"{len(inactive_subdomains)}"
+    )
 
     print(
         f"[+] Subdomains found by both sources: "
         f"{len(common_subdomains)}"
     )
 
+    if active_subdomains:
+        print("[+] Active subdomains:")
+        for subdomain in active_subdomains[:10]:
+            print(f"    - {subdomain}")
 
-    # ========================================================
+        if len(active_subdomains) > 10:
+            print(
+                f"    ... and "
+                f"{len(active_subdomains) - 10} more"
+            )
+        # ========================================================
     # 9. CERTIFICATE COLLECTION
     # ========================================================
 

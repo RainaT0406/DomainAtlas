@@ -29,7 +29,11 @@ from reportlab.platypus import (
 )
 
 from backend.services.pipeline_service import run_osint_pipeline
-
+from backend.services.history_service import save_scan
+from backend.services.history_service import (
+    list_history,
+    get_scan,
+)
 
 # ============================================================
 # ENVIRONMENT
@@ -1307,6 +1311,152 @@ def health():
 
 
 # ============================================================
+# SCAN HISTORY
+# ============================================================
+
+@app.get("/history")
+def get_scan_history():
+    """
+    Return lightweight metadata for all completed scans.
+
+    The full scan results remain stored on disk and are only
+    loaded when a specific scan is requested.
+    """
+
+    try:
+        history = list_history()
+
+        return {
+            "success": True,
+            "count": len(history),
+            "history": history,
+        }
+
+    except Exception as error:
+        print(
+            f"[!] Failed to retrieve scan history: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to retrieve scan history: "
+                f"{str(error)}"
+            ),
+        )
+
+
+# ============================================================
+# GET SINGLE HISTORICAL SCAN
+# ============================================================
+
+@app.get("/history/{scan_id}")
+def get_historical_scan(
+    scan_id: str,
+):
+    """
+    Return the complete saved result for a historical scan.
+    """
+
+    try:
+        scan = get_scan(scan_id)
+
+        if scan is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Historical scan '{scan_id}' "
+                    "was not found."
+                ),
+            )
+
+        return {
+            "success": True,
+            **scan,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            f"[!] Failed to retrieve historical scan "
+            f"{scan_id}: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to retrieve historical scan: "
+                f"{str(error)}"
+            ),
+        )
+
+
+# ============================================================
+# DOWNLOAD HISTORICAL SCAN AS JSON
+# ============================================================
+
+@app.get("/history/{scan_id}/download")
+def download_historical_scan(
+    scan_id: str,
+):
+    """
+    Download a historical scan as a JSON file.
+    """
+
+    try:
+        scan = get_scan(scan_id)
+
+        if scan is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Historical scan '{scan_id}' "
+                    "was not found."
+                ),
+            )
+
+        json_data = json.dumps(
+            scan,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+        file_name = (
+            f"domainatlas_{scan_id}.json"
+        )
+
+        return StreamingResponse(
+            io.BytesIO(
+                json_data.encode("utf-8")
+            ),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{file_name}"'
+                )
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        print(
+            f"[!] Failed to download historical scan "
+            f"{scan_id}: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to download historical scan: "
+                f"{str(error)}"
+            ),
+        )
+
+# ============================================================
 # GLOBAL PROGRESS STREAM
 # ============================================================
 
@@ -2365,6 +2515,37 @@ def analyze_domain(
         progress_store[scan_id][
             "completed_at"
         ] = completion_time
+
+# ====================================================
+# SAVE SCAN HISTORY
+# ====================================================
+
+        try:
+            save_scan(
+                scan_id=scan_id,
+                result={
+                    **result,
+                    "scan_id": scan_id,
+                    "graph": graph,
+                    "provenance": all_provenance,
+                },
+                started_at=progress_store[
+                    scan_id
+                ].get("started_at"),
+                completed_at=completion_time,
+            )
+
+            print(
+                f"[+] Scan history saved for {scan_id}"
+            )
+
+        except Exception as history_error:
+            # History failure must NOT make an otherwise
+            # successful OSINT scan fail.
+            print(
+                "[!] Warning: Could not save scan history: "
+                f"{history_error}"
+            )
 
         # ----------------------------------------------------
         # FINAL PROGRESS EVENT

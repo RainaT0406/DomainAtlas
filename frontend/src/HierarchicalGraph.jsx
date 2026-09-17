@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import cytoscape from "cytoscape";
+import {
+  getPriorityActiveSubdomains,
+  getPrioritizedSubdomains
+} from "./utils/subdomainPriority";
 
 function HierarchicalGraph({
   graph,
@@ -9,6 +13,7 @@ function HierarchicalGraph({
 }) {
   const containerRef = useRef(null);
   const cyRef = useRef(null);
+  const animRef = useRef(null); // track in-flight camera animation
 
   // ============================================================
   // STATE
@@ -32,12 +37,11 @@ function HierarchicalGraph({
   const [selectedNode, setSelectedNode] = useState(null);
   const [isReady, setIsReady] = useState(false);
 
-  // ----------------------------------------------------------
-  // The single source of truth for graph filtering.
-  // null       -> show all nodes in expanded groups
-  // {type,id}  -> show only that node (focus mode)
-  // ----------------------------------------------------------
-  const [focusedNode, setFocusedNode] = useState(null);
+  const [focusedNodes, setFocusedNodes] = useState({
+    Subdomain: null,
+    IPAddress: null,
+    Certificate: null,
+  });
 
   // ============================================================
   // CONSTANTS
@@ -45,28 +49,31 @@ function HierarchicalGraph({
 
   const MAX_VISIBLE_ENTITIES = 5;
   const MAX_SEARCH_RESULTS = 100;
+  const CAMERA_DURATION = 500;
+  const ELEMENT_FADE_MS = 220;
 
   // ============================================================
   // HELPERS
   // ============================================================
 
-  const getType = useCallback((node) => {
-    return String(node?.data?.type ?? "");
-  }, []);
+  const getType = useCallback((node) => String(node?.data?.type ?? ""), []);
 
-  const getNodeId = useCallback((node) => {
-    return String(node?.data?.id ?? node?.id ?? node?.data?.value ?? "");
-  }, []);
+  const getNodeId = useCallback(
+    (node) => String(node?.data?.id ?? node?.id ?? node?.data?.value ?? ""),
+    []
+  );
 
-  const getValue = useCallback((node) => {
-    return String(
-      node?.data?.value ??
-        node?.data?.label ??
-        node?.data?.name ??
-        node?.data?.id ??
-        ""
-    );
-  }, []);
+  const getValue = useCallback(
+    (node) =>
+      String(
+        node?.data?.value ??
+          node?.data?.label ??
+          node?.data?.name ??
+          node?.data?.id ??
+          ""
+      ),
+    []
+  );
 
   const getLabel = useCallback(
     (node) => {
@@ -79,23 +86,28 @@ function HierarchicalGraph({
     [getValue, getType]
   );
 
-  const getRelationship = useCallback((edge) => {
-    return String(
-      edge?.data?.label ?? edge?.data?.relationship ?? edge?.label ?? ""
-    );
-  }, []);
+  const getRelationship = useCallback(
+    (edge) =>
+      String(
+        edge?.data?.label ?? edge?.data?.relationship ?? edge?.label ?? ""
+      ),
+    []
+  );
 
-  const getEdgeSource = useCallback((edge) => {
-    return String(edge?.data?.source ?? "");
-  }, []);
+  const getEdgeSource = useCallback(
+    (edge) => String(edge?.data?.source ?? ""),
+    []
+  );
 
-  const getEdgeTarget = useCallback((edge) => {
-    return String(edge?.data?.target ?? "");
-  }, []);
+  const getEdgeTarget = useCallback(
+    (edge) => String(edge?.data?.target ?? ""),
+    []
+  );
 
-  const uniqueId = useCallback((prefix, id) => {
-    return `${prefix}_${String(id).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-  }, []);
+  const uniqueId = useCallback(
+    (prefix, id) => `${prefix}_${String(id).replace(/[^a-zA-Z0-9_-]/g, "_")}`,
+    []
+  );
 
   const isOrganizationType = useCallback((type) => {
     const t = String(type);
@@ -123,10 +135,30 @@ function HierarchicalGraph({
     () => allNodes.filter((n) => getType(n) === "Domain"),
     [allNodes, getType]
   );
-  const subdomainNodes = useMemo(
-    () => allNodes.filter((n) => getType(n) === "Subdomain"),
-    [allNodes, getType]
-  );
+const subdomainNodes = useMemo(
+  () => allNodes.filter((n) => getType(n) === "Subdomain"),
+  [allNodes, getType]
+);
+
+const activeSubdomainNodes = useMemo(
+  () =>
+    subdomainNodes.filter(
+      (node) =>
+        node.data?.active === true ||
+        node.data?.properties?.active === true
+    ),
+  [subdomainNodes]
+);
+
+const priorityActiveSubdomains = useMemo(
+  () => getPriorityActiveSubdomains(subdomainNodes, 5),
+  [subdomainNodes]
+);
+
+const prioritizedSubdomainNodes = useMemo(
+  () => getPrioritizedSubdomains(subdomainNodes),
+  [subdomainNodes]
+);
   const ipNodes = useMemo(
     () => allNodes.filter((n) => getType(n) === "IPAddress"),
     [allNodes, getType]
@@ -139,9 +171,7 @@ function HierarchicalGraph({
     () =>
       allNodes.filter((n) => {
         const t = getType(n);
-        return (
-          t === "Organization" || t === "ORG" || t === "Organisation"
-        );
+        return t === "Organization" || t === "ORG" || t === "Organisation";
       }),
     [allNodes, getType]
   );
@@ -159,7 +189,7 @@ function HierarchicalGraph({
   );
 
   // ============================================================
-  // PROVENANCE LOOKUP (strict match + grouped by source/method)
+  // PROVENANCE
   // ============================================================
 
   const getProvenanceForNode = useCallback(
@@ -193,15 +223,9 @@ function HierarchicalGraph({
         const g = groups.get(key);
         g.count += 1;
 
-        const t = record.recorded_at
-          ? new Date(record.recorded_at).getTime()
-          : 0;
-        const first = g.first_seen
-          ? new Date(g.first_seen).getTime()
-          : 0;
-        const last = g.last_seen
-          ? new Date(g.last_seen).getTime()
-          : 0;
+        const t = record.recorded_at ? new Date(record.recorded_at).getTime() : 0;
+        const first = g.first_seen ? new Date(g.first_seen).getTime() : 0;
+        const last = g.last_seen ? new Date(g.last_seen).getTime() : 0;
         if (t && (!first || t < first)) g.first_seen = record.recorded_at;
         if (t && (!last || t > last)) g.last_seen = record.recorded_at;
       }
@@ -216,7 +240,7 @@ function HierarchicalGraph({
   );
 
   // ============================================================
-  // LIST FILTER (for sidebar search boxes)
+  // SIDEBAR LIST FILTER
   // ============================================================
 
   const getSearchResults = useCallback(
@@ -226,55 +250,50 @@ function HierarchicalGraph({
       if (!search) return nodes.slice(0, MAX_VISIBLE_ENTITIES);
       const searchLower = search.toLowerCase();
       return nodes
-        .filter((node) =>
-          getValue(node).toLowerCase().includes(searchLower)
-        )
+        .filter((node) => getValue(node).toLowerCase().includes(searchLower))
         .slice(0, MAX_SEARCH_RESULTS);
     },
     [expandedGroups, searchTerms, getValue]
   );
 
-  const subdomainResults = getSearchResults(subdomainNodes, "Subdomain");
+ const subdomainResults = getSearchResults(
+  prioritizedSubdomainNodes,
+  "Subdomain"
+);
   const ipResults = getSearchResults(ipNodes, "IPAddress");
   const certificateResults = getSearchResults(certificateNodes, "Certificate");
 
+  const activeFocuses = useMemo(
+    () => Object.values(focusedNodes).filter(Boolean),
+    [focusedNodes]
+  );
+  const hasFocus = activeFocuses.length > 0;
+
   // ============================================================
-  // MAIN CYTOSCAPE EFFECT
+  // BUILD DESIRED ELEMENTS
   // ============================================================
 
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    if (cyRef.current) {
-      cyRef.current.destroy();
-      cyRef.current = null;
+  const buildDesiredState = useCallback(() => {
+    if (domainNodes.length === 0) {
+      return { elements: [], focusCytoscapeIds: [] };
     }
-
-    setIsReady(false);
-
-    if (domainNodes.length === 0) return;
 
     const domain = domainNodes[0];
     const domainId = getNodeId(domain);
-    if (!domainId) return;
-
-    // ----------------------------------------------------------
-    // What to render based on focusedNode
-    // ----------------------------------------------------------
-
-    const isFocused = focusedNode !== null;
+    if (!domainId) return { elements: [], focusCytoscapeIds: [] };
 
     const pickVisible = (nodes, groupType) => {
-      if (isFocused && focusedNode.type !== groupType) return [];
-      if (isFocused) {
-        return nodes.filter((n) => getNodeId(n) === focusedNode.id);
-      }
+      const focus = focusedNodes[groupType];
+      if (focus) return nodes.filter((n) => getNodeId(n) === focus.id);
       return nodes.slice(0, MAX_VISIBLE_ENTITIES);
     };
 
     const visibleSubdomains = expandedGroups.Subdomain
-      ? pickVisible(subdomainNodes, "Subdomain")
+      ? focusedNodes.Subdomain
+        ? activeSubdomainNodes.filter(
+            (node) => getNodeId(node) === focusedNodes.Subdomain.id
+          )
+        : priorityActiveSubdomains
       : [];
     const visibleIPs = expandedGroups.IPAddress
       ? pickVisible(ipNodes, "IPAddress")
@@ -283,17 +302,12 @@ function HierarchicalGraph({
       ? pickVisible(certificateNodes, "Certificate")
       : [];
 
-    // ----------------------------------------------------------
-    // ASN / Organization discovery (robust, covers multiple models)
-    // ----------------------------------------------------------
-
     const connectedASNIds = new Set();
     const connectedOrganizationIds = new Set();
 
     if (expandedGroups.IPAddress && visibleIPs.length > 0) {
       const visibleIpIds = new Set(visibleIPs.map(getNodeId));
 
-      // 1. Find ASNs connected to visible IPs via BELONGS_TO_ASN
       allEdges.forEach((edge) => {
         const source = getEdgeSource(edge);
         const target = getEdgeTarget(edge);
@@ -303,21 +317,15 @@ function HierarchicalGraph({
         if (visibleIpIds.has(target)) connectedASNIds.add(source);
       });
 
-      // 2. Find Organizations connected to those ASNs via ASSOCIATED_WITH
       allEdges.forEach((edge) => {
         const source = getEdgeSource(edge);
         const target = getEdgeTarget(edge);
         const rel = getRelationship(edge);
         if (rel !== "ASSOCIATED_WITH") return;
-        if (connectedASNIds.has(source))
-          connectedOrganizationIds.add(target);
-        if (connectedASNIds.has(target))
-          connectedOrganizationIds.add(source);
+        if (connectedASNIds.has(source)) connectedOrganizationIds.add(target);
+        if (connectedASNIds.has(target)) connectedOrganizationIds.add(source);
       });
 
-      // 3. Fallback: Organizations directly connected to visible IPs
-      //    (covers data models where the edge is IP <-> Organization,
-      //     not IP -> ASN -> Organization)
       allEdges.forEach((edge) => {
         const source = getEdgeSource(edge);
         const target = getEdgeTarget(edge);
@@ -351,10 +359,6 @@ function HierarchicalGraph({
       connectedOrganizationIds.has(getNodeId(n))
     );
 
-    // ----------------------------------------------------------
-    // Positions
-    // ----------------------------------------------------------
-
     const computeRowPositions = (nodes, centerX, y, spacing) => {
       if (!nodes.length) return [];
       const totalWidth = (nodes.length - 1) * spacing;
@@ -383,10 +387,6 @@ function HierarchicalGraph({
     ];
     const posMap = new Map(positions.map((p) => [p.id, p]));
 
-    // ----------------------------------------------------------
-    // Build elements
-    // ----------------------------------------------------------
-
     const elements = [];
     const addedNodeIds = new Set();
 
@@ -394,7 +394,6 @@ function HierarchicalGraph({
       if (!node) return null;
       const originalId = getNodeId(node);
       if (!originalId) return null;
-
       const cytoscapeId = uniqueId("node", originalId);
       if (addedNodeIds.has(cytoscapeId)) return cytoscapeId;
       addedNodeIds.add(cytoscapeId);
@@ -416,9 +415,7 @@ function HierarchicalGraph({
     };
 
     const groupLabel = (type, totalCount) => {
-      if (isFocused && focusedNode.type === type) {
-        return `${type.toUpperCase()}\n1 focused`;
-      }
+      if (focusedNodes[type]) return `${type.toUpperCase()}\n1 focused`;
       return `${type.toUpperCase()}\n${totalCount} total`;
     };
 
@@ -436,11 +433,7 @@ function HierarchicalGraph({
     addRealNode(domain);
     addGroupNode("__group_subdomains", "Subdomain", subdomainNodes.length);
     addGroupNode("__group_ips", "IPAddress", ipNodes.length);
-    addGroupNode(
-      "__group_certificates",
-      "Certificate",
-      certificateNodes.length
-    );
+    addGroupNode("__group_certificates", "Certificate", certificateNodes.length);
 
     elements.push(
       {
@@ -496,12 +489,7 @@ function HierarchicalGraph({
     });
     visibleCertificates.forEach((node, i) => {
       addRealNode(node);
-      addGroupEntityEdge(
-        "__group_certificates",
-        node,
-        i,
-        "certificate_group_edge"
-      );
+      addGroupEntityEdge("__group_certificates", node, i, "certificate_group_edge");
     });
 
     if (expandedGroups.IPAddress && visibleIPs.length > 0) {
@@ -544,13 +532,47 @@ function HierarchicalGraph({
       });
     }
 
-    // ----------------------------------------------------------
-    // Init Cytoscape (rainforest theme)
-    // ----------------------------------------------------------
+    const focusCytoscapeIds = Object.values(focusedNodes)
+      .filter(Boolean)
+      .map((f) => uniqueId("node", f.id));
+
+    return { elements, focusCytoscapeIds };
+  }, [
+    domainNodes,
+    subdomainNodes,
+    ipNodes,
+    asnNodes,
+    organizationNodes,
+    certificateNodes,
+    allEdges,
+    expandedGroups,
+    focusedNodes,
+    getNodeId,
+    getType,
+    getLabel,
+    getValue,
+    getRelationship,
+    getEdgeSource,
+    getEdgeTarget,
+    uniqueId,
+    findNodeById,
+    isOrganizationType,
+  ]);
+
+  // ============================================================
+  // CYTOSCAPE INIT
+  // ============================================================
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    if (domainNodes.length === 0) return;
+
+    setIsReady(false);
 
     const cy = cytoscape({
       container,
-      elements,
+      elements: [],
 
       style: [
         {
@@ -656,7 +678,6 @@ function HierarchicalGraph({
             shape: "round-rectangle",
           },
         },
-        // Organization style — matches both "Organization" and "ORG"
         {
           selector:
             'node[type="Organization"], node[type="ORG"], node[type="Organisation"]',
@@ -771,12 +792,7 @@ function HierarchicalGraph({
         },
       ],
 
-      layout: {
-        name: "preset",
-        fit: true,
-        padding: 80,
-      },
-
+      layout: { name: "preset" },
       minZoom: 0.15,
       maxZoom: 3,
       wheelSensitivity: 0.25,
@@ -784,67 +800,18 @@ function HierarchicalGraph({
 
     cyRef.current = cy;
 
-    if (subdomainNodes.length === 0) {
-      cy.getElementById("__group_subdomains").style("display", "none");
-      cy.edges("#__struct_domain_subdomains").style("display", "none");
-    }
-    if (ipNodes.length === 0) {
-      cy.getElementById("__group_ips").style("display", "none");
-      cy.edges("#__struct_domain_ips").style("display", "none");
-    }
-    if (certificateNodes.length === 0) {
-      cy.getElementById("__group_certificates").style("display", "none");
-      cy.edges("#__struct_domain_certificates").style("display", "none");
-    }
-
-    // Deferred fit
-    let raf1, raf2;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        if (!cyRef.current) return;
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          cyRef.current.resize();
-          if (isFocused) {
-            const focusId = uniqueId("node", focusedNode.id);
-            const focusEl = cyRef.current.getElementById(focusId);
-            if (!focusEl.empty()) {
-              cyRef.current.animate(
-                {
-                  center: { eles: focusEl },
-                  zoom: 1.6,
-                },
-                { duration: 350 }
-              );
-              focusEl.select();
-            }
-          } else {
-            cyRef.current.fit(cyRef.current.elements(":visible"), 80);
-          }
-        }
-        setIsReady(true);
-      });
-    });
-
-    // ----------------------------------------------------------
-    // Interactions
-    // ----------------------------------------------------------
-
-    // Group header: clear focus, toggle expansion
     cy.on("tap", 'node[type="Group"]', (event) => {
       const group = event.target;
       const groupType = group.data("groupType");
-
-      setFocusedNode(null);
+      setFocusedNodes((prev) => ({ ...prev, [groupType]: null }));
       setSelectedNode(null);
       if (typeof onNodeSelect === "function") onNodeSelect(null);
-
       setExpandedGroups((prev) => ({
         ...prev,
         [groupType]: !prev[groupType],
       }));
     });
 
-    // Entity node: always focus (no toggle-off on re-click)
     cy.on("tap", 'node[type!="Group"]', (event) => {
       const node = event.target;
       const type = String(node.data("type"));
@@ -852,7 +819,11 @@ function HierarchicalGraph({
       if (type === "Domain") {
         node.unselect();
         setSelectedNode(null);
-        setFocusedNode(null);
+        setFocusedNodes({
+          Subdomain: null,
+          IPAddress: null,
+          Certificate: null,
+        });
         if (typeof onNodeSelect === "function") onNodeSelect(null);
         return;
       }
@@ -861,7 +832,10 @@ function HierarchicalGraph({
       const originalNode = findNodeById(originalId);
       if (!originalNode) return;
 
-      setFocusedNode({ type, id: originalId });
+      setFocusedNodes((prev) => ({
+        ...prev,
+        [type]: { type, id: originalId },
+      }));
 
       const connectedEdges = allEdges.filter((edge) => {
         const s = getEdgeSource(edge);
@@ -914,16 +888,11 @@ function HierarchicalGraph({
       resizeTimer = setTimeout(() => {
         if (!cyRef.current) return;
         cyRef.current.resize();
-        if (cyRef.current.nodes().length > 0) {
-          cyRef.current.fit(cyRef.current.elements(":visible"), 80);
-        }
       }, 120);
     });
     resizeObserver.observe(container);
 
     return () => {
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
       clearTimeout(resizeTimer);
       resizeObserver.disconnect();
       if (cyRef.current) {
@@ -932,7 +901,223 @@ function HierarchicalGraph({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, expandedGroups, focusedNode, onNodeSelect]);
+  }, [graph]);
+
+  // ============================================================
+  // SYNC EFFECT — smooth add/remove via opacity fade
+  // ============================================================
+
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+
+    const { elements: desiredElements, focusCytoscapeIds } =
+      buildDesiredState();
+
+    // Stop any in-flight camera animation so it doesn't fight the new one
+    if (animRef.current) {
+      animRef.current.stop();
+      animRef.current = null;
+    }
+
+    const desiredNodeIds = new Set();
+    const desiredEdgeIds = new Set();
+    for (const el of desiredElements) {
+      if (el.group === "nodes") desiredNodeIds.add(el.data.id);
+      else desiredEdgeIds.add(el.data.id);
+    }
+
+    // ---- 1. FADE OUT + REMOVE STALE ELEMENTS ----
+    const staleEdges = cy
+      .edges()
+      .filter((e) => !desiredEdgeIds.has(e.id()));
+    const staleNodes = cy
+      .nodes()
+      .filter((n) => !desiredNodeIds.has(n.id()));
+
+    if (staleEdges.length > 0 || staleNodes.length > 0) {
+      const stale = staleEdges.union(staleNodes);
+      stale.animate(
+        {
+          style: {
+            opacity: 0,
+            "border-opacity": 0,
+            "background-opacity": 0,
+            "text-opacity": 0,
+            "line-opacity": 0,
+          },
+        },
+        {
+          duration: ELEMENT_FADE_MS,
+          complete: () => {
+            stale.remove();
+          },
+        }
+      );
+    }
+
+    // ---- 2. ADD NEW ELEMENTS WITH opacity: 0 ----
+    const toAdd = [];
+    for (const el of desiredElements) {
+      const existing = cy.getElementById(el.data.id);
+      if (existing.empty()) {
+        toAdd.push({ ...el, style: { opacity: 0 } });
+      }
+    }
+
+    const addedEls = toAdd.length > 0 ? cy.add(toAdd) : cy.collection();
+
+    // ---- 3. UPDATE EXISTING ELEMENTS (data + position) ----
+    for (const el of desiredElements) {
+      const existing = cy.getElementById(el.data.id);
+      if (existing.empty()) continue;
+      existing.data(el.data);
+      if (el.position) existing.position(el.position);
+      // Ensure opacity is 1 (in case it was fading)
+      existing.style("opacity", 1);
+    }
+
+    // ---- 4. FADE IN NEWLY ADDED ----
+    if (addedEls.length > 0) {
+      addedEls.animate(
+        { style: { opacity: 1 } },
+        { duration: ELEMENT_FADE_MS, easing: "ease-out" }
+      );
+    }
+
+    // ---- 5. Hide empty groups ----
+    const hideIfEmpty = (groupId, edgeId, isEmpty) => {
+      const g = cy.getElementById(groupId);
+      const e = cy.getElementById(edgeId);
+      if (!g.empty()) g.style("display", isEmpty ? "none" : "element");
+      if (!e.empty()) e.style("display", isEmpty ? "none" : "element");
+    };
+    hideIfEmpty(
+      "__group_subdomains",
+      "__struct_domain_subdomains",
+      subdomainNodes.length === 0
+    );
+    hideIfEmpty(
+      "__group_ips",
+      "__struct_domain_ips",
+      ipNodes.length === 0
+    );
+    hideIfEmpty(
+      "__group_certificates",
+      "__struct_domain_certificates",
+      certificateNodes.length === 0
+    );
+
+    // ---- 6. Update selection ----
+    cy.nodes().unselect();
+    focusCytoscapeIds.forEach((id) => {
+      const el = cy.getElementById(id);
+      if (!el.empty()) el.select();
+    });
+
+    // ---- 7. SMOOTH CAMERA TRANSITION ----
+    // Wait a tick so newly-added elements have their positions applied
+    const rafId = requestAnimationFrame(() => {
+      const cyNow = cyRef.current;
+      if (!cyNow) return;
+
+      let targetZoom;
+      let targetPan;
+
+      if (focusCytoscapeIds.length > 0) {
+        const focusEls = focusCytoscapeIds
+          .map((id) => cyNow.getElementById(id))
+          .filter((el) => !el.empty());
+
+        if (focusEls.length > 0) {
+          const collection = cyNow.collection(
+            focusEls.flatMap((el) => [el, ...el.connectedEdges()])
+          );
+          const bb = collection.boundingBox();
+          const padding = 160;
+          const containerW = cyNow.width();
+          const containerH = cyNow.height();
+          const bbW = bb.w + padding * 2;
+          const bbH = bb.h + padding * 2;
+          targetZoom = Math.min(
+            cyNow.maxZoom(),
+            Math.max(
+              cyNow.minZoom(),
+              Math.min(containerW / bbW, containerH / bbH)
+            )
+          );
+          targetPan = {
+            x: containerW / 2 - ((bb.x1 + bb.x2) / 2) * targetZoom,
+            y: containerH / 2 - ((bb.y1 + bb.y2) / 2) * targetZoom,
+          };
+        }
+      }
+
+      if (targetZoom === undefined) {
+        // Fit all visible
+        const visible = cyNow.elements(":visible");
+        if (visible.length > 0) {
+          const bb = visible.boundingBox();
+          const padding = 80;
+          const containerW = cyNow.width();
+          const containerH = cyNow.height();
+          const bbW = bb.w + padding * 2;
+          const bbH = bb.h + padding * 2;
+          targetZoom = Math.min(
+            cyNow.maxZoom(),
+            Math.max(
+              cyNow.minZoom(),
+              Math.min(containerW / bbW, containerH / bbH)
+            )
+          );
+          targetPan = {
+            x: containerW / 2 - ((bb.x1 + bb.x2) / 2) * targetZoom,
+            y: containerH / 2 - ((bb.y1 + bb.y2) / 2) * targetZoom,
+          };
+        }
+      }
+
+      if (targetZoom !== undefined && targetPan !== undefined) {
+        // Skip animation if we're already essentially there
+        const currentZoom = cyNow.zoom();
+        const currentPan = cyNow.pan();
+        const zoomDelta = Math.abs(currentZoom - targetZoom);
+        const panDelta =
+          Math.abs(currentPan.x - targetPan.x) +
+          Math.abs(currentPan.y - targetPan.y);
+
+        if (zoomDelta < 0.01 && panDelta < 2) {
+          // Nothing to animate
+          if (!isReady) setIsReady(true);
+          return;
+        }
+
+        const anim = cyNow.animate(
+          { zoom: targetZoom, pan: targetPan },
+          {
+            duration: CAMERA_DURATION,
+            easing: "ease-out-cubic",
+            complete: () => {
+              animRef.current = null;
+            },
+          }
+        );
+        animRef.current = anim;
+      }
+
+      if (!isReady) setIsReady(true);
+    });
+
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  }, [
+    buildDesiredState,
+    subdomainNodes.length,
+    ipNodes.length,
+    certificateNodes.length,
+    isReady,
+  ]);
 
   // ============================================================
   // ACTIONS
@@ -950,10 +1135,25 @@ function HierarchicalGraph({
 
   const handleEntityClick = (type, node) => {
     setExpandedGroups((prev) => ({ ...prev, [type]: true }));
-    setFocusedNode({ type, id: getNodeId(node) });
-
+    setFocusedNodes((prev) => ({
+      ...prev,
+      [type]: { type, id: getNodeId(node) },
+    }));
     setSelectedNode(null);
     if (typeof onNodeSelect === "function") onNodeSelect(null);
+  };
+
+  const clearFocus = (type) => {
+    if (type) {
+      setFocusedNodes((prev) => ({ ...prev, [type]: null }));
+    } else {
+      setFocusedNodes({
+        Subdomain: null,
+        IPAddress: null,
+        Certificate: null,
+      });
+    }
+    setSelectedNode(null);
   };
 
   // ============================================================
@@ -962,7 +1162,6 @@ function HierarchicalGraph({
 
   return (
     <div style={{ width: "100%", position: "relative" }}>
-      {/* Graph Container */}
       <div
         ref={containerRef}
         className="cytoscape-container hierarchical-graph-container"
@@ -983,19 +1182,18 @@ function HierarchicalGraph({
           `,
           backgroundSize: `100% 100%, 100% 100%, 30px 30px, 30px 30px`,
           opacity: isReady ? 1 : 0,
-          transition: "opacity 0.25s ease-out",
+          transition: "opacity 0.4s ease-out",
           boxShadow: "0 1px 3px rgba(10, 46, 26, 0.04)",
         }}
       />
 
-      {/* Focus chip */}
-      {focusedNode && (
+      {hasFocus && (
         <div
           style={{
             position: "absolute",
             top: "12px",
             right: "12px",
-            padding: "6px 12px",
+            padding: "8px 12px",
             background: "#0a2e1a",
             color: "#ffffff",
             borderRadius: "20px",
@@ -1006,38 +1204,76 @@ function HierarchicalGraph({
             gap: "8px",
             zIndex: 10,
             boxShadow: "0 2px 8px rgba(10,46,26,0.2)",
-            maxWidth: "60%",
+            maxWidth: "70%",
+            flexWrap: "wrap",
           }}
         >
-          <span
-            style={{
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Focused: {focusedNode.id}
-          </span>
+          {activeFocuses.map((f) => (
+            <span
+              key={f.type}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                background: "rgba(255,255,255,0.12)",
+                padding: "3px 8px",
+                borderRadius: "12px",
+                maxWidth: "220px",
+              }}
+            >
+              <span
+                style={{
+                  color: "#8aca9a",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.3px",
+                  fontWeight: "700",
+                }}
+              >
+                {f.type}
+              </span>
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {f.id}
+              </span>
+              <button
+                type="button"
+                onClick={() => clearFocus(f.type)}
+                title={`Clear ${f.type} focus`}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                  fontSize: "13px",
+                  lineHeight: 1,
+                  padding: 0,
+                  marginLeft: "2px",
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
           <button
             type="button"
-            onClick={() => {
-              setFocusedNode(null);
-              setSelectedNode(null);
-            }}
+            onClick={() => clearFocus(null)}
             title="Show all nodes"
             style={{
               background: "rgba(255,255,255,0.15)",
               border: "none",
               color: "#ffffff",
               cursor: "pointer",
-              padding: "2px 8px",
+              padding: "3px 10px",
               borderRadius: "10px",
               fontSize: "10px",
               fontWeight: "700",
               lineHeight: 1,
-              display: "flex",
-              alignItems: "center",
-              gap: "4px",
               whiteSpace: "nowrap",
             }}
           >
@@ -1046,7 +1282,6 @@ function HierarchicalGraph({
         </div>
       )}
 
-      {/* Search & Lists */}
       {(subdomainNodes.length > 0 ||
         ipNodes.length > 0 ||
         certificateNodes.length > 0) && (
@@ -1058,7 +1293,6 @@ function HierarchicalGraph({
             marginTop: "14px",
           }}
         >
-          {/* Subdomains */}
           {expandedGroups.Subdomain && subdomainNodes.length > 0 && (
             <div
               style={{
@@ -1079,7 +1313,6 @@ function HierarchicalGraph({
               >
                 Subdomains ({subdomainNodes.length})
               </div>
-
               <input
                 type="text"
                 placeholder="Search subdomains..."
@@ -1098,7 +1331,6 @@ function HierarchicalGraph({
                   fontSize: "12px",
                 }}
               />
-
               <div style={{ maxHeight: "150px", overflowY: "auto" }}>
                 {subdomainResults.map((node) => (
                   <button
@@ -1131,7 +1363,6 @@ function HierarchicalGraph({
                   </button>
                 ))}
               </div>
-
               {subdomainNodes.length > MAX_VISIBLE_ENTITIES &&
                 !searchTerms.Subdomain.trim() && (
                   <div
@@ -1149,7 +1380,6 @@ function HierarchicalGraph({
             </div>
           )}
 
-          {/* IP Addresses */}
           {expandedGroups.IPAddress && ipNodes.length > 0 && (
             <div
               style={{
@@ -1170,7 +1400,6 @@ function HierarchicalGraph({
               >
                 IP Addresses ({ipNodes.length})
               </div>
-
               <input
                 type="text"
                 placeholder="Search IP addresses..."
@@ -1189,7 +1418,6 @@ function HierarchicalGraph({
                   fontSize: "12px",
                 }}
               />
-
               <div style={{ maxHeight: "150px", overflowY: "auto" }}>
                 {ipResults.map((node) => (
                   <button
@@ -1225,7 +1453,6 @@ function HierarchicalGraph({
             </div>
           )}
 
-          {/* Certificates */}
           {expandedGroups.Certificate && certificateNodes.length > 0 && (
             <div
               style={{
@@ -1246,7 +1473,6 @@ function HierarchicalGraph({
               >
                 Certificates ({certificateNodes.length})
               </div>
-
               <input
                 type="text"
                 placeholder="Search certificates..."
@@ -1265,7 +1491,6 @@ function HierarchicalGraph({
                   fontSize: "12px",
                 }}
               />
-
               <div style={{ maxHeight: "150px", overflowY: "auto" }}>
                 {certificateResults.map((node) => (
                   <button
@@ -1303,7 +1528,6 @@ function HierarchicalGraph({
         </div>
       )}
 
-      {/* Node Details Panel */}
       {selectedNode && (
         <div
           style={{
@@ -1320,7 +1544,6 @@ function HierarchicalGraph({
             overflowY: "auto",
           }}
         >
-          {/* Header */}
           <div
             style={{
               display: "flex",
@@ -1354,7 +1577,6 @@ function HierarchicalGraph({
                 {selectedNode.value}
               </div>
             </div>
-
             <button
               type="button"
               onClick={closeSelection}
@@ -1383,7 +1605,6 @@ function HierarchicalGraph({
             </button>
           </div>
 
-          {/* Type Badge */}
           <div
             style={{
               display: "inline-block",
@@ -1407,7 +1628,6 @@ function HierarchicalGraph({
             {selectedNode.type}
           </div>
 
-          {/* Provenance Section (grouped) */}
           {selectedNode.provenance && selectedNode.provenance.length > 0 && (
             <div style={{ marginBottom: "20px" }}>
               <div
@@ -1422,7 +1642,6 @@ function HierarchicalGraph({
               >
                 📋 Provenance & Evidence
               </div>
-
               <div
                 style={{
                   display: "grid",
@@ -1489,11 +1708,9 @@ function HierarchicalGraph({
                           : "N/A"}
                       </span>
                     </div>
-
                     <div style={{ fontSize: "11px", color: "#1a4a2a" }}>
                       <strong>Method:</strong> {record.method}
                     </div>
-
                     {record.first_seen &&
                       record.last_seen &&
                       record.first_seen !== record.last_seen && (
@@ -1510,7 +1727,6 @@ function HierarchicalGraph({
                           {new Date(record.last_seen).toLocaleDateString()}
                         </div>
                       )}
-
                     {record.details && (
                       <div
                         style={{
@@ -1532,7 +1748,6 @@ function HierarchicalGraph({
             </div>
           )}
 
-          {/* Relationships */}
           {Array.isArray(selectedNode.connectedEdges) &&
             selectedNode.connectedEdges.length > 0 && (
               <div>
@@ -1548,7 +1763,6 @@ function HierarchicalGraph({
                 >
                   Relationships
                 </div>
-
                 <div style={{ display: "grid", gap: "6px" }}>
                   {selectedNode.connectedEdges.map((edge, index) => {
                     const source = getEdgeSource(edge);
@@ -1556,7 +1770,6 @@ function HierarchicalGraph({
                     const relationship = getRelationship(edge);
                     const sourceNode = findNodeById(source);
                     const targetNode = findNodeById(target);
-
                     return (
                       <div
                         key={edge?.data?.id ?? index}
@@ -1611,7 +1824,6 @@ function HierarchicalGraph({
         </div>
       )}
 
-      {/* Instructions */}
       <div
         style={{
           marginTop: "12px",
@@ -1621,8 +1833,9 @@ function HierarchicalGraph({
           padding: "8px",
         }}
       >
-        Click a category to expand it. Click an entity to focus on it. Click the
-        group header or "Show all" to see all nodes.
+        Click a category to expand it. Click an entity to focus on it (you can
+        focus one of each type at once). Click the group header or "Show all" to
+        see all nodes.
       </div>
     </div>
   );

@@ -257,6 +257,10 @@ def normalize_data(data):
             # Add Subdomain Entity
             # -------------------------------------------------
 
+            active = bool(
+                subdomain_data.get("active", False)
+            )
+
             if sources:
                 for source in sources:
                     add_entity(
@@ -267,6 +271,9 @@ def normalize_data(data):
                         source,
                         "Subdomain discovery",
                         recorded_at,
+                        properties={
+                            "active": active
+                        },
                     )
             else:
                 add_entity(
@@ -277,8 +284,10 @@ def normalize_data(data):
                     "Subdomain Enumeration",
                     "Subdomain discovery",
                     recorded_at,
+                    properties={
+                        "active": active
+                    },
                 )
-
             # -------------------------------------------------
             # Domain → Subdomain
             # -------------------------------------------------

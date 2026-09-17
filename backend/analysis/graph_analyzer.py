@@ -1211,7 +1211,30 @@ def _build_infrastructure(
             continue
 
         seen.add(value)
-        subdomains.append(value)
+
+        active_value = properties.get(
+            "active",
+            False,
+        )
+
+        if isinstance(active_value, str):
+            active = (
+                active_value.strip().lower()
+                in {
+                    "true",
+                    "1",
+                    "yes",
+                }
+            )
+        else:
+            active = bool(active_value)
+
+        subdomains.append(
+            {
+                "subdomain": value,
+                "active": active,
+            }
+        )
 
     # --------------------------------------------------------
     # IP ADDRESSES
@@ -1521,10 +1544,7 @@ def _build_infrastructure(
         )
 
     return {
-        "subdomains": sorted(
-            subdomains
-        ),
-
+         "subdomains": subdomains,
         "ip_addresses": sorted(
             ip_addresses
         ),

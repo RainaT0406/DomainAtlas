@@ -2955,3 +2955,149 @@ section {
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
+
+
+/* ============================================================
+   SCAN HISTORY
+   ============================================================ */
+
+.history-section {
+  padding: 60px 0;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.history-card {
+  background: #ffffff;
+  border: 1px solid #e5ebe7;
+  border-radius: 14px;
+  padding: 22px;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.history-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(20, 60, 40, 0.08);
+}
+
+.history-card-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.history-card h3 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.history-date {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #607068;
+}
+
+.history-id {
+  margin: 0;
+  font-size: 11px;
+  color: #8a9690;
+  word-break: break-all;
+}
+
+.history-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.history-actions button {
+  border: none;
+  border-radius: 8px;
+  padding: 9px 15px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.history-view-button {
+  background: #176b45;
+  color: white;
+}
+
+.history-download-button {
+  background: #edf3ef;
+  color: #176b45;
+}
+
+.history-actions button:hover {
+  opacity: 0.88;
+}
+
+.history-stats {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid #edf1ee;
+}
+
+.history-stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-stats strong {
+  font-size: 18px;
+  color: #18352a;
+}
+
+.history-stats span {
+  font-size: 11px;
+  color: #748078;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-empty {
+  padding: 40px;
+  text-align: center;
+  background: #f7faf8;
+  border: 1px dashed #d8e2dc;
+  border-radius: 14px;
+  color: #68766e;
+}
+
+.history-error {
+  color: #a33b3b;
+}
+
+@media (max-width: 900px) {
+  .history-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .history-card-main {
+    flex-direction: column;
+  }
+
+  .history-actions {
+    width: 100%;
+  }
+
+  .history-actions button {
+    flex: 1;
+  }
+
+  .history-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

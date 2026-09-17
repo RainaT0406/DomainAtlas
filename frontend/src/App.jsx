@@ -41,6 +41,7 @@ import InfoRow from "./components/InfoRow";
 import PatternCard from "./components/PatternCard";
 import AIReport from "./components/AIReport";
 import ScanTimer from "./components/ScanTimer";
+import History from "./components/History";
 import {
   useScanTimer,
 } from "./utils/useScanTimer";
@@ -91,6 +92,8 @@ function App() {
 
   const [activeNav, setActiveNav] =
     useState("overview");
+  
+  const [currentPage, setCurrentPage] = useState("dashboard");
 
   // ============================================================
   // SCAN LIFECYCLE REFS
@@ -142,20 +145,166 @@ function App() {
   // NAVIGATION
   // ============================================================
 
-  const scrollToSection = (
-    ref,
-    sectionName
-  ) => {
-    if (!ref.current) return;
+const scrollToSection = (ref, sectionName) => {
+  if (!ref.current) return;
+  setActiveNav(sectionName);
+  ref.current.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
+};
 
-    setActiveNav(sectionName);
 
-    ref.current.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-    });
-  };
+// ============================================================
+// VIEW HISTORICAL SCAN
+// ============================================================
 
+const viewHistoricalScan = async (scanId) => {
+  try {
+    setError("");
+    setLoading(true);
+
+    const response = await fetch(
+      `http://127.0.0.1:8000/history/${encodeURIComponent(scanId)}`
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to load historical scan.");
+    }
+
+    const data = await response.json();
+    const historicalResult = data.result;
+
+    if (!historicalResult) {
+      throw new Error(
+        "Historical scan contains no result data."
+      );
+    }
+
+    const rawData = historicalResult.raw_data || {};
+    const graphAnalysis =
+      historicalResult.graph_analysis || {};
+
+    /*
+     * Rebuild the frontend analysis structure from
+     * the data stored in the history snapshot.
+     */
+    const rawVirusTotal =
+      rawData.virustotal ||
+      historicalResult.virustotal ||
+      {};
+
+    const historicalVirusTotal = {
+      domain: rawVirusTotal.domain || "",
+      risk_score: rawVirusTotal.risk_score ?? 0,
+      reputation: rawVirusTotal.reputation ?? 0,
+      security_summary:
+        rawVirusTotal.security_summary || {},
+      whois_info:
+        rawVirusTotal.whois_info || {},
+      vendor_breakdown: [],
+      risk_factors: [],
+      community_votes: {},
+    };
+    const restoredResult = {
+      ...historicalResult,
+
+      infrastructure:
+        graphAnalysis.infrastructure || {
+          subdomains: rawData.subdomains || [],
+          ip_addresses: rawData.ips || [],
+          asns: [
+            ...new Set(
+              (rawData.ip_metadata || [])
+                .map((item) => item?.asn)
+                .filter(Boolean)
+            ),
+          ],
+          organizations: [
+            ...new Set(
+              (rawData.ip_metadata || [])
+                .map((item) => item?.organization)
+                .filter(Boolean)
+            ),
+          ],
+          certificates: rawData.certificates || [],
+          certificate_details: [],
+        },
+
+      statistics:
+        graphAnalysis.statistics ||
+        historicalResult.statistics ||
+        {},
+
+      ip_version_summary:
+        graphAnalysis.ip_version_summary ||
+        historicalResult.ip_version_summary ||
+        {},
+
+      subdomain_patterns:
+        graphAnalysis.subdomain_patterns ||
+        historicalResult.subdomain_patterns ||
+        {},
+
+      observations:
+        graphAnalysis.observations ||
+        historicalResult.observations ||
+        [],
+
+      provenance:
+        historicalResult.provenance || [],
+
+      ai_report:
+        historicalResult.ai_report || "",
+
+      graph:
+        historicalResult.graph || {
+          nodes: [],
+          edges: [],
+          provenance: [],
+        },
+
+      virustotal: historicalVirusTotal,
+
+      port_scan:
+        rawData.port_scan ||
+        historicalResult.port_scan ||
+        {},
+    };
+
+    const normalizedHistoricalResult =
+      normalizeAnalysisData(restoredResult);
+
+    setAnalysis(normalizedHistoricalResult);
+    setScanId(data.scan_id || scanId);
+
+    setCurrentPage("dashboard");
+    setActiveNav("overview");
+    setLoading(false);
+
+    setTimeout(() => {
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
+    }, 100);
+
+  } catch (error) {
+    console.error(
+      "Failed to load historical scan:",
+      error
+    );
+
+    setError(
+      error.message ||
+      "Unable to load historical scan."
+    );
+
+    setLoading(false);
+  }
+};
+
+  
   // ============================================================
   // SCROLL TRACKING
   // ============================================================
@@ -1122,6 +1271,15 @@ const completedScanId =
     )
       ? infrastructure.subdomains
       : [];
+    console.log(
+      "[App] infrastructure.subdomains sample:",
+      infrastructure.subdomains?.[0]
+    );
+
+    console.log(
+      "[App] subdomains sample:",
+      subdomains[0]
+    );
 
   const certificates =
     Array.isArray(
@@ -1370,156 +1528,193 @@ const completedScanId =
           </p>
 
           <NavButton
-            active={
-              activeNav ===
-              "overview"
-            }
+              active={
+                currentPage === "dashboard" &&
+                activeNav === "overview"
+              }
             icon={
               <BarChart3
                 size={17}
               />
             }
             label="Overview"
-            onClick={() =>
+            onClick={() => {
+              setCurrentPage("dashboard");
               scrollToSection(
                 dashboardRef,
                 "overview"
-              )
-            }
+              );
+            }}
           />
 
-          <NavButton
-            active={
-              activeNav ===
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "infrastructure"
+          }
+          icon={
+            <Server
+              size={17}
+            />
+          }
+          label="Infrastructure"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              infrastructureRef,
               "infrastructure"
-            }
-            icon={
-              <Server
-                size={17}
-              />
-            }
-            label="Infrastructure"
-            onClick={() =>
-              scrollToSection(
-                infrastructureRef,
-                "infrastructure"
-              )
-            }
-          />
+            );
+          }}
+        />
 
-          <NavButton
-            active={
-              activeNav === "graph"
-            }
-            icon={
-              <Network
-                size={17}
-              />
-            }
-            label="Relationship Graph"
-            onClick={() =>
-              scrollToSection(
-                graphRef,
-                "graph"
-              )
-            }
-          />
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "graph"
+          }
+          icon={
+            <Network
+              size={17}
+            />
+          }
+          label="Relationship Graph"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              graphRef,
+              "graph"
+            );
+          }}
+        />
 
-          <NavButton
-            active={
-              activeNav ===
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "subdomains"
+          }
+          icon={
+            <Globe
+              size={17}
+            />
+          }
+          label="Subdomains"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              subdomainsRef,
               "subdomains"
-            }
-            icon={
-              <Globe
-                size={17}
-              />
-            }
-            label="Subdomains"
-            onClick={() =>
-              scrollToSection(
-                subdomainsRef,
-                "subdomains"
-              )
-            }
-          />
+            );
+          }}
+        />
 
-          <NavButton
-            active={
-              activeNav ===
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "certificates"
+          }
+          icon={
+            <FileKey
+              size={17}
+            />
+          }
+          label="Certificates"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              certificatesRef,
               "certificates"
-            }
-            icon={
-              <FileKey
-                size={17}
-              />
-            }
-            label="Certificates"
-            onClick={() =>
-              scrollToSection(
-                certificatesRef,
-                "certificates"
-              )
-            }
-          />
+            );
+          }}
+        />
 
-          <NavButton
-            active={
-              activeNav === "ports"
-            }
-            icon={
-              <Plug size={17} />
-            }
-            label="Port Scan"
-            onClick={() =>
-              scrollToSection(
-                portsRef,
-                "ports"
-              )
-            }
-          />
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "ports"
+          }
+          icon={
+            <Plug
+              size={17}
+            />
+          }
+          label="Port Scan"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              portsRef,
+              "ports"
+            );
+          }}
+        />
 
-          <p className="nav-label">
-            INTELLIGENCE
-          </p>
+        <p className="nav-label">
+          INTELLIGENCE
+        </p>
 
-          <NavButton
-            active={
-              activeNav ===
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "virustotal"
+          }
+          icon={
+            <Shield
+              size={17}
+            />
+          }
+          label="VirusTotal"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              virustotalRef,
               "virustotal"
-            }
-            icon={
-              <Shield
-                size={17}
-              />
-            }
-            label="VirusTotal"
-            onClick={() =>
-              scrollToSection(
-                virustotalRef,
-                "virustotal"
-              )
-            }
-          />
+            );
+          }}
+        />
+
+        <NavButton
+          active={
+            currentPage === "dashboard" &&
+            activeNav === "ai"
+          }
+          icon={
+            <Brain
+              size={17}
+            />
+          }
+          label="AI Assessment"
+          onClick={() => {
+            setCurrentPage("dashboard");
+            scrollToSection(
+              aiReportRef,
+              "ai"
+            );
+          }}
+        />
+                {/* ======================================================
+              HISTORY
+          ====================================================== */}
+
+          <div className="sidebar-history-divider" />
 
           <NavButton
             active={
-              activeNav === "ai"
+              currentPage === "history"
             }
             icon={
-              <Brain
+              <Database
                 size={17}
               />
             }
-            label="AI Assessment"
-            onClick={() =>
-              scrollToSection(
-                aiReportRef,
-                "ai"
-              )
-            }
+            label="Scan History"
+            onClick={() => {
+              setCurrentPage("history");
+              setActiveNav("history");
+              window.scrollTo({
+                top: 0,
+                behavior: "smooth",
+              });
+            }}
           />
-
         </nav>
 
         <div className="sidebar-footer">
@@ -1548,6 +1743,12 @@ const completedScanId =
 
       <main className="main-content">
 
+      {currentPage === "history" ? (
+        <History
+          onViewScan={viewHistoricalScan}
+        />
+      ) : (
+          <>
         {/* ====================================================
             HERO
         ==================================================== */}
@@ -2446,29 +2647,37 @@ const completedScanId =
 
                           {subdomains.map(
                             (
-                              subdomain,
+                              subdomainData,
                               index
-                            ) => (
-                              <tr
-                                key={`${subdomain}-${index}`}
-                              >
-                                <td>
-                                  {String(
-                                    index +
-                                      1
-                                  ).padStart(
-                                    4,
-                                    "0"
-                                  )}
-                                </td>
+                            ) => {
+                              const subdomain =
+                                typeof subdomainData === "string"
+                                  ? subdomainData
+                                  : subdomainData?.subdomain || "";
 
-                                <td>
-                                  {
-                                    subdomain
-                                  }
-                                </td>
-                              </tr>
-                            )
+                              const active =
+                                typeof subdomainData === "object" &&
+                                subdomainData?.active === true;
+
+                              return (
+                                <tr
+                                  key={`${subdomain}-${index}`}
+                                >
+                                  <td>
+                                    {String(
+                                      index + 1
+                                    ).padStart(
+                                      4,
+                                      "0"
+                                    )}
+                                  </td>
+
+                                  <td>
+                                    {subdomain}
+                                  </td>
+                                </tr>
+                              );
+                            }
                           )}
 
                         </tbody>
@@ -3334,6 +3543,8 @@ const completedScanId =
                 </div>
               </section>
 
+
+
               {/* ==============================================
                   FOOTER
               ============================================== */}
@@ -3380,7 +3591,11 @@ const completedScanId =
             </>
           )}
 
-      </main>
+    
+    </>
+  )}
+
+</main>
     </div>
   );
 }
